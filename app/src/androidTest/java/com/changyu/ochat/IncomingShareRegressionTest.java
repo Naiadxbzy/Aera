@@ -67,7 +67,7 @@ public class IncomingShareRegressionTest {
   rejected(new Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM,tooMany));
   rejected(new Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_INTENT,new Intent(Intent.ACTION_VIEW,Uri.parse("file:///secret"))));
  }
- @Test public void manifestOffersOChatForDocumentSharing(){
+ @Test public void manifestOffersAeraForDocumentSharing(){
   Intent intent=new Intent(Intent.ACTION_SEND).setType("application/pdf").addCategory(Intent.CATEGORY_DEFAULT);
   boolean found=false;for(android.content.pm.ResolveInfo match:context().getPackageManager().queryIntentActivities(intent,0))if(MainActivity.class.getName().equals(match.activityInfo.name))found=true;
   assertTrue(found);

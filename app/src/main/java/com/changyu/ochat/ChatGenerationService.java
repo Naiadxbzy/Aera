@@ -31,15 +31,23 @@ public final class ChatGenerationService extends Service {
   final PdfPageFallback.Session pdfPages=new PdfPageFallback.Session();boolean pdfFallbackTried;String pdfOriginalError="";
   SearchOptions search=SearchOptions.OFF;SearchSources sources=new SearchSources();
   volatile boolean finished;private volatile String sourceUpdate="";boolean error,stopped,started;StreamingMarkdown stream,reasoningStream;
+  boolean enhanced,networkDisrupted;String phaseStatus="正在准备上下文和附件…",networkNote="";Runnable pendingNetworkAction;long waitingSince,startedElapsed;
   JSONObject configuredModel=new JSONObject(),usage=new JSONObject();String completionState="complete",finishReason="",searchNote="",searchStatus="";final JSONArray toolEvents=new JSONArray();int contextTokens,omittedMessages;long startedAt;
   Run(String sessionId,String modelId,String effort,long timestamp){this.sessionId=sessionId;this.modelId=modelId;this.effort=effort;this.timestamp=timestamp;}
  }
  private final Handler main=new Handler(Looper.getMainLooper());
  private final ExecutorService worker=Executors.newFixedThreadPool(2);
  private PowerManager.WakeLock wake;
+ private long wakeRenewAt;
+ private GenerationNetworkMonitor network;
  private final Runnable checkpoint=new Runnable(){public void run(){
-  for(Run run:new ArrayList<>(runs.values()))if(valid(run)){persist(run,false);if(System.currentTimeMillis()-run.startedAt>30*60*1000L)finish(run,"",false,true);}
-  if(!runs.isEmpty())main.postDelayed(this,3000);
+  for(Run run:new ArrayList<>(runs.values()))if(valid(run)){
+   persist(run,false);
+   if(run.waitingSince>0&&SystemClock.elapsedRealtime()-run.waitingSince>=10*60*1000L){run.finishReason="等待网络恢复超过 10 分钟，请检查网络与后台设置后重试";finish(run,run.finishReason,true,false);}
+   else if(!run.enhanced&&SystemClock.elapsedRealtime()-run.startedElapsed>30*60*1000L){run.finishReason="本次生成已达 30 分钟，可在设置 → 后台连接开启普通增强";finish(run,run.finishReason,true,true);}
+  }
+  if(!runs.isEmpty())renewWake();
+  main.removeCallbacks(this);if(!runs.isEmpty())main.postDelayed(this,3000);
  }};
  static Run active(){return current;}
  static Run active(String sessionId){return runs.get(sessionId);}
@@ -86,6 +94,7 @@ public final class ChatGenerationService extends Service {
    NotificationChannel channel=new NotificationChannel(CHANNEL,"对话生成",NotificationManager.IMPORTANCE_LOW);
    channel.setDescription("回复生成期间保持连接，可随时停止");getSystemService(NotificationManager.class).createNotificationChannel(channel);
   }
+  network=new GenerationNetworkMonitor(this,main,this::networkChanged);network.start();
  }
  @Override public int onStartCommand(Intent intent,int flags,int startId){
   if(intent!=null&&STOP.equals(intent.getAction())){
@@ -97,19 +106,49 @@ public final class ChatGenerationService extends Service {
   if(runs.isEmpty()){stopSelf();return START_NOT_STICKY;}
   try{
    Run representative=active();if(Build.VERSION.SDK_INT>=29)startForeground(NOTICE,notification(representative),ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);else startForeground(NOTICE,notification(representative));
-   if(wake==null){PowerManager power=(PowerManager)getSystemService(POWER_SERVICE);wake=power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,getPackageName()+":generation");wake.acquire(30*60*1000L);}
+   renewWake();
   }catch(RuntimeException failure){for(Run run:new ArrayList<>(runs.values()))finish(run,"无法启动后台生成服务，请重试。",true,false);return START_NOT_STICKY;}
   for(Run run:new ArrayList<>(runs.values()))if(!run.started){
-   run.started=true;run.startedAt=System.currentTimeMillis();run.client.withModel(run.configuredModel);
+   run.started=true;run.startedAt=System.currentTimeMillis();run.startedElapsed=SystemClock.elapsedRealtime();run.enhanced=BackgroundProtection.enabled(this);run.client.withModel(run.configuredModel).withBackgroundResilience(run.enhanced);
    run.stream=new StreamingMarkdown(run.partial,text->{if(valid(run))publish(run);});
    run.reasoningStream=new StreamingMarkdown(run.reasoningText,text->{if(valid(run))publish(run);});publish(run);
-   worker.execute(()->{
-    try{if(!new ModelCapabilities(run.modelId,run.protocol,run.configuredModel).preserveReasoning()||!ChatApiClient.CHAT_COMPLETIONS.equals(run.protocol))for(int i=0;i<run.history.length();i++)run.history.getJSONObject(i).remove("reasoning_content");int capacity=ModelCapabilities.positive(run.configuredModel,"contextLength",ContextBudget.DEFAULT_CONTEXT),output=Integer.parseInt(run.outputTokens);ContextBudget.Result initial=ContextBudget.trim(run.history,capacity,output);run.history=initial.messages;run.omittedMessages=initial.omitted;prepareAttachments(run);recognizeDocuments(run);DocumentOcr.scrub(run.history);run.history=DeepSeekDocumentInput.prepare(getApplicationContext(),run.base,run.modelId,run.protocol,run.history,run.pdfPages,()->valid(run),text->main.post(()->status(run,text)));ContextBudget.Result budget=ContextBudget.trim(run.history,capacity,output);run.history=budget.messages;run.contextTokens=budget.estimatedTokens;run.omittedMessages+=budget.omitted;main.post(()->{if(valid(run))search(run);});}
-    catch(Exception failure){main.post(()->finish(run,failure.getMessage()==null?"附件或上下文准备失败，请检查配置。":failure.getMessage(),true,false));}
-    finally{run.session=null;run.prepared=Collections.emptyMap();if(!valid(run))run.pdfPages.close();}
-   });
+   if(networkReady(run,()->prepare(run)))prepare(run);
   }
   main.removeCallbacks(checkpoint);main.postDelayed(checkpoint,3000);return START_NOT_STICKY;
+ }
+ private void prepare(Run run){
+  worker.execute(()->{
+    try{if(!new ModelCapabilities(run.modelId,run.protocol,run.configuredModel).preserveReasoning()||!ChatApiClient.CHAT_COMPLETIONS.equals(run.protocol))for(int i=0;i<run.history.length();i++)run.history.getJSONObject(i).remove("reasoning_content");int capacity=ModelCapabilities.positive(run.configuredModel,"contextLength",ContextBudget.DEFAULT_CONTEXT),output=Integer.parseInt(run.outputTokens);ContextBudget.Result initial=ContextBudget.trim(run.history,capacity,output);run.history=initial.messages;run.omittedMessages=initial.omitted;prepareAttachments(run);recognizeDocuments(run);DocumentOcr.scrub(run.history);run.history=DeepSeekDocumentInput.prepare(getApplicationContext(),run.base,run.modelId,run.protocol,run.history,run.pdfPages,()->valid(run),text->main.post(()->status(run,text)));ContextBudget.Result budget=ContextBudget.trim(run.history,capacity,output);run.history=budget.messages;run.contextTokens=budget.estimatedTokens;run.omittedMessages+=budget.omitted;main.post(()->{if(valid(run))search(run);});}
+    catch(Exception failure){main.post(()->finish(run,networkFailure(run,failure.getMessage()==null?"附件或上下文准备失败，请检查配置。":failure.getMessage()),true,false));}
+    finally{run.session=null;run.prepared=Collections.emptyMap();if(!valid(run))run.pdfPages.close();}
+   });
+ }
+ private void renewWake(){
+  if(runs.isEmpty())return;
+  if(wake==null){PowerManager power=getSystemService(PowerManager.class);if(power==null)return;wake=power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,getPackageName()+":generation");wake.setReferenceCounted(false);}
+  long now=SystemClock.elapsedRealtime();
+  if(!wake.isHeld()||now>=wakeRenewAt){wake.acquire(10*60*1000L);wakeRenewAt=now+9*60*1000L;}
+ }
+ private boolean networkReady(Run run,Runnable action){
+  if(!valid(run))return false;
+  GenerationNetworkState.State state=network==null?GenerationNetworkState.State.UNKNOWN:network.state();
+  if(!run.enhanced||!GenerationNetworkState.mustWait(state))return true;
+  run.pendingNetworkAction=action;if(run.waitingSince==0)run.waitingSince=SystemClock.elapsedRealtime();
+  if(state!=GenerationNetworkState.State.CHECKING)run.networkDisrupted=true;run.networkNote=GenerationNetworkState.note(state);status(run,run.phaseStatus);return false;
+ }
+ private void networkChanged(GenerationNetworkState.State state){
+  for(Run run:new ArrayList<>(runs.values()))if(valid(run)&&run.enhanced){
+   run.networkNote=GenerationNetworkState.note(state);
+   if(state==GenerationNetworkState.State.OFFLINE||state==GenerationNetworkState.State.BLOCKED||state==GenerationNetworkState.State.CAPTIVE)run.networkDisrupted=true;
+   status(run,run.phaseStatus);
+   if(!GenerationNetworkState.mustWait(state)&&run.pendingNetworkAction!=null){
+    Runnable action=run.pendingNetworkAction;run.pendingNetworkAction=null;run.waitingSince=0;action.run();
+   }
+  }
+ }
+ private String networkFailure(Run run,String message){
+  if(!run.enhanced||!run.networkDisrupted)return message;
+  return message+"\n本次生成期间网络曾断开或受系统限制。已保存收到的内容；为避免重复计费，未自动重发。请检查设置 → 后台连接。";
  }
  private Notification notification(Run run){
   Intent open=new Intent(this,MainActivity.class).putExtra("resumeGeneration",true).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP|Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -122,11 +161,12 @@ public final class ChatGenerationService extends Service {
    .addAction(0,"停止生成",stop).build();
  }
  private void status(Run run,String value){
-  if(!valid(run))return;run.status=value;publish(run);
+  if(!valid(run))return;run.phaseStatus=value;run.status=run.networkNote.isEmpty()?value:run.networkNote;publish(run);
   if(Build.VERSION.SDK_INT<33||ContextCompat.checkSelfPermission(this,android.Manifest.permission.POST_NOTIFICATIONS)==android.content.pm.PackageManager.PERMISSION_GRANTED)
    try{getSystemService(NotificationManager.class).notify(NOTICE,notification(run));}catch(SecurityException ignored){}
  }
  private void search(Run run){
+  if(!networkReady(run,()->search(run)))return;
   if(!run.search.error.isEmpty()){finish(run,run.search.error,true,false);return;}
   if(run.search.builtin){try{run.history=SearchGrounding.withPolicy(run.history);status(run,"内置搜索可用 · 由模型决定是否搜索");chat(run);}catch(JSONException invalid){finish(run,"搜索上下文构建失败",true,false);}return;}
   if(!run.search.tavily){chat(run);return;}
@@ -148,11 +188,11 @@ public final class ChatGenerationService extends Service {
   SearchSources copy=SearchSources.parse(sources.items);
   main.post(()->{if(valid(run)){
    if(run.search.tavily){JSONArray combined=new JSONArray();for(int i=0;i<run.sources.items.length();i++)combined.put(run.sources.items.opt(i));for(int i=0;i<copy.items.length();i++)combined.put(copy.items.opt(i));run.sources=SearchSources.parse(combined);}else run.sources=copy;
-   if(!status.isEmpty()){run.status=status;run.searchStatus=status;}publish(run);
+   if(!status.isEmpty()){run.searchStatus=status;status(run,status);}else publish(run);
   }});
  }
  private void chat(Run run){
-  if(!valid(run))return;
+  if(!networkReady(run,()->chat(run)))return;
   try{
    boolean sampling=new ModelCapabilities(run.modelId,run.protocol,run.configuredModel).sampling;double temperature=sampling?ModelStore.range(run.temperature,2):.7,top=sampling?ModelStore.range(run.topP,1):1;int max=Integer.parseInt(run.outputTokens);if(max<=0)throw new IllegalArgumentException();
    ContextBudget.Result budget=ContextBudget.trim(run.history,ModelCapabilities.positive(run.configuredModel,"contextLength",ContextBudget.DEFAULT_CONTEXT),max);run.history=budget.messages;run.contextTokens=budget.estimatedTokens;run.omittedMessages+=budget.omitted;max=budget.outputTokens;
@@ -167,11 +207,11 @@ public final class ChatGenerationService extends Service {
     public void onSearchSources(SearchSources value,String status){sources(run,value,status);}
     public void onToolEvent(JSONObject event){main.post(()->{if(valid(run))run.toolEvents.put(event);});}
     public void onDone(){main.post(()->finish(run,run.partial.toString(),run.partial.length()==0,false));}
-    public void onFinished(GenerationResult result){main.post(()->{run.completionState=result.state;run.finishReason=result.reason;run.usage=result.usage;if("filtered".equals(result.state)&&run.partial.length()==0)run.partial.append("模型未提供可显示的回答，回复因内容限制而终止。");finish(run,run.partial.toString(),false,"interrupted".equals(result.state));});}
+    public void onFinished(GenerationResult result){main.post(()->{run.completionState=result.state;run.finishReason="interrupted".equals(result.state)?networkFailure(run,result.reason):result.reason;run.usage=result.usage;if("filtered".equals(result.state)&&run.partial.length()==0)run.partial.append("模型未提供可显示的回答，回复因内容限制而终止。");finish(run,run.partial.toString(),false,"interrupted".equals(result.state));});}
     public void onError(String message){main.post(()->{
      if(!valid(run))return;
      if(!run.pdfFallbackTried&&run.partial.length()==0&&run.reasoningText.length()==0&&PdfPageFallback.shouldRetry(message,run.history)){retryPdfAsImages(run,message);return;}
-     String detail=run.pdfFallbackTried?run.pdfOriginalError+"\n逐页图像兼容发送仍失败：\n"+message:message;
+     String detail=networkFailure(run,run.pdfFallbackTried?run.pdfOriginalError+"\n逐页图像兼容发送仍失败：\n"+message:message);
      run.completionState="interrupted";run.finishReason=detail;
      if(run.partial.length()>0)finish(run,run.partial.toString(),false,true);else finish(run,detail,true,false);
     });}
@@ -194,13 +234,13 @@ public final class ChatGenerationService extends Service {
   if(text.isEmpty()&&!stopped)text=run.reasoningText.length()>0?"模型只返回了思考内容，尚未生成最终回答。":"模型返回了空内容";
   if(error&&run.finishReason.isEmpty())run.finishReason=text;
   if(!error&&!stopped&&run.search.grounded()&&run.searchStatus.isEmpty())run.searchStatus="本次未调用搜索或网页读取";
-  run.error=error;run.stopped=stopped;run.finished=true;run.cancel.cancel();run.pdfPages.close();
+  run.error=error;run.stopped=stopped;run.finished=true;run.pendingNetworkAction=null;run.cancel.cancel();run.pdfPages.close();
   if(stopped){run.completionState="interrupted";run.status="回复已停止或中断";}else if(error){run.completionState="error";run.status="回复生成失败";}else run.status=new GenerationResult(run.completionState,run.finishReason,run.usage).label();
   if(run.stream!=null)run.stream.seal();if(run.reasoningStream!=null)run.reasoningStream.seal();
   run.partial.setLength(0);run.partial.append(text);
   persist(run,true);
   runs.remove(run.sessionId);if(current==run)current=runs.isEmpty()?null:runs.values().iterator().next();
-  publish(run);if(!stopped)resumeQueue(this,run.sessionId);
+  publish(run);if(!stopped&&!error)resumeQueue(this,run.sessionId);
   if(runs.isEmpty()){main.removeCallbacks(checkpoint);if(wake!=null&&wake.isHeld())wake.release();wake=null;stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}
   else {getSystemService(NotificationManager.class).notify(NOTICE,notification(current));main.removeCallbacks(checkpoint);main.postDelayed(checkpoint,3000);}
  }
@@ -260,7 +300,7 @@ public final class ChatGenerationService extends Service {
   if((!DocumentOcr.enabled(run.configuredModel,true)&&!DocumentOcr.enabled(run.configuredModel,false))||!DocumentOcr.hasMedia(run.history))return;
   DocumentOcr.Plan plan=DocumentOcr.plan(ModelStore.read(getSharedPreferences("chat",MODE_PRIVATE)),run.configuredModel,run.base,run.modelId,run.history);
   if(plan.empty())return;
-  ChatApiClient client=run.ocrClient==null?new ChatApiClient(run.cancel):run.ocrClient;
+  ChatApiClient client=(run.ocrClient==null?new ChatApiClient(run.cancel):run.ocrClient).withBackgroundResilience(run.enhanced);
   run.history=DocumentOcr.prepare(getApplicationContext(),plan,run.history,run.pdfPages,()->valid(run),text->main.post(()->status(run,text)),client,(messageId,record)->main.post(()->cacheRecognition(run,messageId,record)));
   main.post(()->{if(valid(run))try{
    if(plan.pdf!=null)run.toolEvents.put(new JSONObject().put("tool","pdf_ocr").put("status","completed").put("input",plan.pdf.provider.optString("name")+" · "+plan.pdf.id).put("output","PDF 已转为文字"));
@@ -285,7 +325,7 @@ public final class ChatGenerationService extends Service {
  @Override public void onTimeout(int startId,int type){for(Run run:new ArrayList<>(runs.values()))finish(run,"后台运行时间已达系统限制，请重试。",true,true);}
  @Override public void onDestroy(){
   for(Run run:new ArrayList<>(runs.values()))finish(run,run.partial.toString(),run.partial.length()==0,true);
-  main.removeCallbacksAndMessages(null);worker.shutdownNow();if(wake!=null&&wake.isHeld())wake.release();super.onDestroy();
+  if(network!=null)network.close();main.removeCallbacksAndMessages(null);worker.shutdownNow();if(wake!=null&&wake.isHeld())wake.release();super.onDestroy();
  }
  @Override public IBinder onBind(Intent intent){return null;}
 }

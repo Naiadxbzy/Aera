@@ -38,6 +38,6 @@
 
 模型请求全部使用模拟接口，没有调用用户的真实收费服务。首轮设备测试的一项断言依赖 JSON 字符串的斜杠转义形式，改为校验实际文字字段后保留页码断言通过。识别准确率及真实服务的收费、限流、上下文行为未通过付费服务验证，没有运行整个历史设备套件。
 
-签名 APK：app/build/outputs/apk/release/app-release.apk；6,405,079 字节（6.108 MiB），之前为 14.130 MiB。SHA-256：7c03e218e5b6804a23ec6e91d727507b03362c8d7f93c63a151aca381556da0b。旧 release-artifacts/OChat-1.1.1.apk 归档保留，不包含本次替换。
+签名 APK：app/build/outputs/apk/release/app-release.apk；6,405,079 字节（6.108 MiB），之前为 14.130 MiB。SHA-256：7c03e218e5b6804a23ec6e91d727507b03362c8d7f93c63a151aca381556da0b。旧 1.1.1 APK 归档保留，不包含本次替换。
 
 版本保持 1.1.1 / versionCode 3，不提交、不推送、不发布。

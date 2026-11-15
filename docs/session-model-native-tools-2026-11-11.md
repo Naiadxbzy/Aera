@@ -39,7 +39,7 @@ Tavily 未配置或失败时仅关闭本次外部搜索，保留独立工具开�
 
 首轮回归发现重命名依赖异步落盘才刷新标题，补上立即刷新后保留原断言通过。所有模型请求均使用本地模拟接口，没有使用真实 API Key；厂商实际权限、收费、限流和模型组合限制尚需用户自己的服务验证。本次没有运行包含已知 Markdown 链接长按问题的整个设备套件。
 
-版本保持 1.1.1 / versionCode 3。assembleRelease 成功，签名包输出到 app/build/outputs/apk/release/app-release.apk，apksigner 验证 v2 签名通过，证书与旧版一致。已有 release-artifacts/OChat-1.1.1.apk 历史归档保留；历史归档不包含本次工具改动。没有提交、推送或发布 GitHub Release。
+版本保持 1.1.1 / versionCode 3。assembleRelease 成功，签名包输出到 app/build/outputs/apk/release/app-release.apk，apksigner 验证 v2 签名通过，证书与旧版一致。已有 1.1.1 APK 历史归档保留；历史归档不包含本次工具改动。没有提交、推送或发布 GitHub Release。
 
 ## 官方参考
 

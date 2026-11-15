@@ -50,7 +50,7 @@ final class IncomingShare {
    ClipData clip=intent.getClipData();
    if(clip!=null){if(clip.getItemCount()>AttachmentBatch.MAX_COUNT)throw new IOException("一次最多分享 "+AttachmentBatch.MAX_COUNT+" 个文件");for(int i=0;i<clip.getItemCount();i++)add(uris,clip.getItemAt(i).getUri());}
    add(uris,intent.getData());
-   if(uris.isEmpty())throw new IOException("没有收到可读取的文件，请在其他应用选中文档后分享到 OChat");
+   if(uris.isEmpty())throw new IOException("没有收到可读取的文件，请在其他应用选中文档后分享到 Aera");
    if(uris.size()>AttachmentBatch.MAX_COUNT)throw new IOException("一次最多分享 "+AttachmentBatch.MAX_COUNT+" 个文件");
    for(Uri uri:uris)validate(context,uri);
    CharSequence value=intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
@@ -66,9 +66,9 @@ final class IncomingShare {
   if(uri==null||!"content".equals(uri.getScheme())||uri.toString().length()>MAX_URI_CHARS)throw new IOException("分享文件必须提供 content:// 读取授权");
   String authority=uri.getAuthority();if(authority==null||authority.isEmpty())throw new IOException("分享文件地址无效");
   int user=authority.lastIndexOf('@');if(user>=0){if(!authority.substring(0,user).matches("[0-9]+"))throw new IOException("分享文件地址无效");authority=authority.substring(user+1);}
-  if((context.getPackageName()+".attachments").equals(authority))throw new IOException("不能通过外部分享读取 OChat 的私有附件");
+  if((context.getPackageName()+".attachments").equals(authority))throw new IOException("不能通过外部分享读取 Aera 的私有附件");
   ProviderInfo provider=context.getPackageManager().resolveContentProvider(authority,0);
-  if(provider!=null&&provider.applicationInfo!=null&&provider.applicationInfo.uid==Process.myUid())throw new IOException("不能通过外部分享读取 OChat 的私有文件");
+  if(provider!=null&&provider.applicationInfo!=null&&provider.applicationInfo.uid==Process.myUid())throw new IOException("不能通过外部分享读取 Aera 的私有文件");
   boolean granted=context.checkUriPermission(uri,Process.myPid(),Process.myUid(),Intent.FLAG_GRANT_READ_URI_PERMISSION)==PackageManager.PERMISSION_GRANTED;
   // Public read-only providers need no grant. Non-exported FileProviders are accepted only with a real URI grant.
   if(!granted&&(provider==null||!provider.exported||provider.readPermission!=null||(provider.pathPermissions!=null&&provider.pathPermissions.length>0)))throw new IOException("分享应用未授予文件读取权限，请从原应用重新分享");

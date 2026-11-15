@@ -1,8 +1,8 @@
-# DeepSeek 文档输入与 OChat 1.1.1（2026-11-11）
+# DeepSeek 文档输入与 Aera 1.1.1（2026-11-11）
 
 ## 原因与实现
 
-DeepSeek 官方 Responses 文档明确说明不支持原文件输入。OChat 之前把 PDF 作为 input_file 发送，只有接口报错时才执行 PDF 图像重试，无法处理接口正常回复但未读取附件的情况。接口返回成功不能作为附件已经被理解的证据。
+DeepSeek 官方 Responses 文档明确说明不支持原文件输入。Aera 之前把 PDF 作为 input_file 发送，只有接口报错时才执行 PDF 图像重试，无法处理接口正常回复但未读取附件的情况。接口返回成功不能作为附件已经被理解的证据。
 
 本次增加发送前的文档转换，只匹配 api.deepseek.com 官方域名及 Chat Completions、Responses、Anthropic 协议，不按模型名称改变第三方接口的行为。
 
@@ -41,7 +41,7 @@ DeepSeek 官方 Responses 文档明确说明不支持原文件输入。OChat 之
 ## 安装包
 
 - 版本：1.1.1；versionCode：3。
-- 归档：release-artifacts/OChat-1.1.1.apk。
+- 归档：当日生成的 1.1.1 历史归档 APK。
 - 大小：14,804,947 字节（14.12 MiB）。
 - SHA-256：70d956cff75e113b4290646743fc426fa3b1749e8dc3d35ab00023b2f8aa1b6a。
 - apksigner 验证成功，v2 签名；使用与旧版相同的发布证书。

@@ -1,3 +1,6 @@
 <resources>
-    <string name="app_name">OChat</string>
+    <string name="app_name">Aera</string>
+    <string name="background_shizuku_status">%1$s%2$s\n%3$s</string>
+    <string name="background_system_page_missing">无法打开该系统页面，请手动前往系统设置 → 应用 → Aera</string>
+    <string name="background_shizuku_missing">未找到 Shizuku，请通过安装与启动指南进行配置</string>
 </resources>

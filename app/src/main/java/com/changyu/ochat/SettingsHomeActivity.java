@@ -32,6 +32,7 @@ public class SettingsHomeActivity extends AppCompatActivity {
         addCard(body,"对话设置","全局对话默认参数与初始系统提示词",v->open("conversation"));
         String searchMode=prefs.getString(SearchOptions.PREF,SearchOptions.AUTO);String searchSummary=SearchOptions.RESPONSES.equals(searchMode)?"Responses内置搜索 · 无需 Tavily Key":SearchOptions.TAVILY.equals(searchMode)?(prefs.getString("tavilyKey","").trim().isEmpty()?"Tavily · Key 未配置":"Tavily · Key 已配置"):"自动 · 按供应商协议选择";
         addCard(body,"联网搜索",searchSummary,v->open("search"));
+        addCard(body,"后台连接",BackgroundProtection.summary(this),v->startActivity(new Intent(this,BackgroundSettingsActivity.class)));
         addCard(body,"主题设置",themeSummary(),v->open("theme"));
         addCard(body,"话题命名模型",prefs.getBoolean("topicEnabled",false)?topicSummary():"未启用",v->open("topic"));
         body.addView(text("设置会保存在本机，重启应用后仍然有效。",12,muted,false)); TextView surprise=text("千万别点",16,ink,true); surprise.setGravity(Gravity.CENTER_VERTICAL); surprise.setPadding(dp(16),dp(14),dp(12),dp(14)); surprise.setBackground(round(ThemePalette.resolve(this).surface,16)); surprise.setOnClickListener(v->randomizeTheme()); LinearLayout.LayoutParams surpriseParams=new LinearLayout.LayoutParams(-1,dp(56)); surpriseParams.setMargins(0,dp(16),0,0); body.addView(surprise,surpriseParams); scroll.addView(body); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1)); ScreenInsets.apply(this,root); return root;

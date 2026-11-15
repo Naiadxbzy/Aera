@@ -12,7 +12,8 @@ import androidx.core.graphics.ColorUtils;
 /** Large artwork canvas with a separate, literal source inspector. */
 final class CodePreview {
  static PanelDialog show(Context context,String raw,String language){
-  ThemePalette p=ThemePalette.resolve(context);boolean svg="svg".equalsIgnoreCase(language);
+  ThemePalette p=ThemePalette.resolve(context);CodePalette codePalette=CodePalette.resolve(context);
+  boolean svg="svg".equalsIgnoreCase(MarkupSource.language(raw,language));
   LinearLayout body=new LinearLayout(context);body.setOrientation(LinearLayout.VERTICAL);
   LinearLayout toolbar=new LinearLayout(context);toolbar.setGravity(Gravity.CENTER_VERTICAL);toolbar.setPadding(0,0,0,dp(context,12));
   LinearLayout tabs=new LinearLayout(context);tabs.setPadding(dp(context,4),dp(context,4),dp(context,4),dp(context,4));
@@ -40,9 +41,9 @@ final class CodePreview {
   String document=MarkdownRenderer.sanitizePreviewDocument(raw);
   Runnable load=()->{loading.setVisibility(View.VISIBLE);web.setTag(null);web.setInitialScale(0);web.loadDataWithBaseURL("https://preview.invalid/",document,"text/html","UTF-8",null);};
   stage.addView(web,0,new FrameLayout.LayoutParams(-1,-1));
-  ScrollView vertical=new ScrollView(context);vertical.setFillViewport(true);vertical.setBackgroundColor(0xff18242e);
+  ScrollView vertical=new ScrollView(context);vertical.setTag("preview-source");vertical.setFillViewport(true);vertical.setBackgroundColor(codePalette.background);
   HorizontalScrollView horizontal=new HorizontalScrollView(context);
-  TextView code=UiStyle.text(context,"",12,0xffdce6ed,false);code.setText(CodeBlockView.highlight(raw));code.setTypeface(Typeface.MONOSPACE);
+  TextView code=UiStyle.text(context,"",12,codePalette.text,false);code.setText(CodeBlockView.highlight(raw,codePalette));code.setTypeface(Typeface.MONOSPACE);
   code.setTextIsSelectable(true);code.setHorizontallyScrolling(true);code.setLineSpacing(dp(context,3),1);
   code.setPadding(dp(context,18),dp(context,18),dp(context,18),dp(context,18));code.setContentDescription("完整源码");
   horizontal.addView(code,new HorizontalScrollView.LayoutParams(-2,-2));

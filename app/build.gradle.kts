@@ -26,8 +26,8 @@ android {
         applicationId = "com.changyu.ochat"
         minSdk = 24
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 4
+        versionName = "1.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -57,6 +57,9 @@ android {
             }
         }
     }
+    buildFeatures {
+        aidl = true
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -69,6 +72,8 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
     implementation(libs.okhttp)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-tables:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")
@@ -81,14 +86,16 @@ dependencies {
 }
 
 // Keep versioned release artifacts outside build/, which Gradle cleans during packaging.
-val archiveVersionName = android.defaultConfig.versionName
 tasks.register<Copy>("archiveReleaseApk") {
+    // Capture simple values during configuration, never the Gradle script at execution time.
+    val archiveFileName = "Aera-${android.defaultConfig.versionName}.apk"
+    val hasReleaseSigning = releaseSigning != null
     dependsOn("assembleRelease")
     from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
     into(rootProject.layout.projectDirectory.dir("release-artifacts"))
-    rename { "OChat-$archiveVersionName.apk" }
+    rename { archiveFileName }
     doFirst {
-        if (releaseSigning == null) {
+        if (!hasReleaseSigning) {
             throw GradleException("Local release signing is required to archive a release APK.")
         }
     }

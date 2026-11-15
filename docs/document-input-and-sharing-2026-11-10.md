@@ -51,7 +51,7 @@ MainActivity 接收 ACTION_SEND / ACTION_SEND_MULTIPLE，支持 EXTRA_STREAM、C
 
 [OpenAI PDF 输入](https://developers.openai.com/api/docs/guides/file-inputs)要求支持视觉的模型，PDF 文本与页图像一起处理；[Claude PDF 支持](https://platform.claude.com/docs/en/build-with-claude/pdf-support)使用 document 内容块处理文本与页图像。
 
-此修正验证 OChat 实际发出的字节和协议格式，不代表任意第三方代理、文本模型或任意加密 / 损坏 PDF 都能识别。模型页数、上下文、请求大小和服务端能力限制仍适用。没有添加本地 OCR 或大型文档渲染依赖，也没有访问真实收费模型接口。
+此修正验证 Aera 实际发出的字节和协议格式，不代表任意第三方代理、文本模型或任意加密 / 损坏 PDF 都能识别。模型页数、上下文、请求大小和服务端能力限制仍适用。没有添加本地 OCR 或大型文档渲染依赖，也没有访问真实收费模型接口。
 
 ## 验证
 

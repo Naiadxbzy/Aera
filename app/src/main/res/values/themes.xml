@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.OChat" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.Aera" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">@color/cyan_700</item>
         <item name="colorPrimaryVariant">@color/cyan_700</item>
         <item name="colorOnPrimary">#FFFFFF</item>

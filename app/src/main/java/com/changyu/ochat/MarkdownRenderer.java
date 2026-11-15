@@ -22,20 +22,42 @@ final class MarkdownRenderer {
  private static final Pattern OPEN_FENCE=Pattern.compile("(`{3,}|~{3,})([^\\r\\n]*)\\r?\\n");
  static final class FencedSource {final String raw,language;FencedSource(String r,String l){raw=r;language=l;}}
  static final class Fence {
-  int start,end,bodyStart,bodyEnd;String language;boolean closed;
+  int start,end,bodyStart,bodyEnd;String language;boolean closed,literalMarkup;
+ }
+ private static Fence fence(String source,Matcher open){
+  String marker=open.group(1),info=open.group(2).trim();Fence block=new Fence();
+  block.start=open.start();block.bodyStart=open.end();block.language=info.isEmpty()?"代码":info.split("\\s+",2)[0];
+  Pattern closing=Pattern.compile("(?m)^[ \\t]{0,3}"+Pattern.quote(marker.substring(0,1))+"{"+marker.length()+",}[ \\t]*(?:\\r?\\n|$)");
+  Matcher close=closing.matcher(source);block.closed=close.find(block.bodyStart);
+  block.bodyEnd=block.closed?close.start():source.length();block.end=block.closed?close.end():source.length();return block;
  }
  static List<Fence> fences(String source){
   List<Fence> blocks=new ArrayList<>();Matcher open=OPEN_FENCE.matcher(source);int cursor=0;
-  while(open.find(cursor)){
-   String marker=open.group(1),info=open.group(2).trim();Fence block=new Fence();
-   block.start=open.start();block.bodyStart=open.end();
-   block.language=info.isEmpty()?"代码":info.split("\\s+",2)[0];
-   Pattern closing=Pattern.compile("(?m)^[ \\t]{0,3}"+Pattern.quote(marker.substring(0,1))+"{"+marker.length()+",}[ \\t]*(?:\\r?\\n|$)");
-   Matcher close=closing.matcher(source);block.closed=close.find(block.bodyStart);
-   block.bodyEnd=block.closed?close.start():source.length();block.end=block.closed?close.end():source.length();
-   blocks.add(block);cursor=block.end;if(!block.closed||cursor>=source.length())break;
+  while(open.find(cursor)){Fence block=fence(source,open);blocks.add(block);cursor=block.end;if(!block.closed||cursor>=source.length())break;}
+  return blocks;
+ }
+ /** Every production message path uses these ranges, including bare model-generated SVG. */
+ static List<Fence> codeBlocks(String source){
+  List<Fence> blocks=new ArrayList<>();Matcher open=OPEN_FENCE.matcher(source);int cursor=0;
+  while(cursor<source.length()){
+   boolean found=open.find(cursor);
+   MarkupSource.Block markup=MarkupSource.next(source,cursor,found?open.start():source.length());
+   Fence block;
+   if(markup!=null){
+    block=new Fence();block.start=block.bodyStart=markup.start;block.end=block.bodyEnd=markup.end;
+    block.language=markup.language;block.closed=markup.closed;block.literalMarkup=true;
+   }else if(found)block=fence(source,open);else break;
+   blocks.add(block);cursor=block.end;
   }
   return blocks;
+ }
+ private static void literalFence(StringBuilder result,String source,Fence block){
+  // A model may put Markdown fence characters in an SVG text node, comment or CDATA.
+  int longest=0,run=0;for(int i=block.bodyStart;i<block.bodyEnd;i++){if(source.charAt(i)=='~'){run++;longest=Math.max(longest,run);}else run=0;}
+  String marker=String.join("",Collections.nCopies(Math.max(3,longest+1),"~"));
+  result.append("\n\n").append(marker).append(block.language).append('\n').append(source,block.bodyStart,block.bodyEnd);
+  if(block.bodyEnd==block.bodyStart||source.charAt(block.bodyEnd-1)!='\n')result.append('\n');
+  result.append(marker).append("\n\n");
  }
  static List<FencedSource> extractFencedSources(String source){
   List<FencedSource> result=new ArrayList<>();if(source==null)return result;
@@ -49,9 +71,9 @@ final class MarkdownRenderer {
  static String processMarkdown(String source){
   if(source==null||source.isEmpty())return "";
   StringBuilder result=new StringBuilder();int cursor=0;
-  for(Fence block:fences(source)){
+  for(Fence block:codeBlocks(source)){
    result.append(processProse(source.substring(cursor,block.start)));
-   result.append(source,block.start,block.end);cursor=block.end;
+   if(block.literalMarkup)literalFence(result,source,block);else result.append(source,block.start,block.end);cursor=block.end;
   }
   return result.append(processProse(source.substring(cursor))).toString();
  }
@@ -167,7 +189,7 @@ final class MarkdownRenderer {
     public void configureVisitor(MarkwonVisitor.Builder b){
      b.on(CopyNode.class,(v,node)->{
       int languageStart=v.length();
-      v.builder().append(node.language.toUpperCase(Locale.ROOT));
+      v.builder().append(node.language.toLowerCase(Locale.ROOT));
       v.setSpans(languageStart,new android.text.style.ForegroundColorSpan(palette.primary));
       v.setSpans(languageStart,new android.text.style.StyleSpan(android.graphics.Typeface.BOLD));
       v.setSpans(languageStart,new android.text.style.RelativeSizeSpan(.8f));
@@ -188,7 +210,7 @@ final class MarkdownRenderer {
      n.accept(new org.commonmark.node.AbstractVisitor(){
       public void visit(org.commonmark.node.FencedCodeBlock code){
        String info=code.getInfo();
-       String lang=info==null||info.trim().isEmpty()?"代码":info.trim().split("\\s+",2)[0];
+       String lang=MarkupSource.language(code.getLiteral(),info==null||info.trim().isEmpty()?"代码":info.trim().split("\\s+",2)[0]);
        org.commonmark.node.Paragraph cap=new org.commonmark.node.Paragraph();
        cap.appendChild(new CopyNode(code.getLiteral(),lang));
        code.insertBefore(cap);

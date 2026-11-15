@@ -55,7 +55,7 @@ public class CodeViewportRegressionTest {
    CodeBlockView block=find(message,CodeBlockView.class);assertNotNull(block);block.setExpanded(true);
    message.setMarkdown("说明\n\n```svg\n<svg width=\"10\"><path d=\"M0 0\"/></svg>\n```\n结束");
    assertSame(block,find(message,CodeBlockView.class));assertTrue(block.isExpanded());
-   Spanned highlighted=(Spanned)CodeBlockView.highlight(block.source());assertTrue(highlighted.getSpans(0,highlighted.length(),ForegroundColorSpan.class).length>=4);
+   Spanned highlighted=(Spanned)CodeBlockView.highlight(block.source(),CodePalette.resolve(context));assertTrue(highlighted.getSpans(0,highlighted.length(),ForegroundColorSpan.class).length>=4);
    assertEquals(block.source(),highlighted.toString());
   });
  }

@@ -22,6 +22,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "OChat"
+rootProject.name = "Aera"
 include(":app")
  

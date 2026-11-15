@@ -98,7 +98,7 @@ public class FinalFlowRegressionTest {
   }finally{target.delete();}
  }
  @Test public void finalScreensRemainCompactAndPreviewExplainsStaticMode()throws Exception{
-  JSONObject s=session("ui-final",0).put("title","代码预览与长会话优化");StringBuilder code=new StringBuilder("<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n  <meta charset=\"UTF-8\">\n  <style>\n    body { background: #edf8fb; color: #16353f; }\n    .card { border-radius: 24px; padding: 32px; }\n  </style>\n</head>\n<body>\n  <main class=\"card\">\n    <h1>你好，OChat</h1>\n    <p>简约、清晰，专注对话。</p>\n  </main>\n</body>\n</html>");
+  JSONObject s=session("ui-final",0).put("title","代码预览与长会话优化");StringBuilder code=new StringBuilder("<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n  <meta charset=\"UTF-8\">\n  <style>\n    body { background: #edf8fb; color: #16353f; }\n    .card { border-radius: 24px; padding: 32px; }\n  </style>\n</head>\n<body>\n  <main class=\"card\">\n    <h1>你好，Aera</h1>\n    <p>简约、清晰，专注对话。</p>\n  </main>\n</body>\n</html>");
   s.getJSONArray("messages").put(new JSONObject().put("id","ui-user").put("user",true).put("text","做一个简洁的 HTML 预览示例"));
   s.getJSONArray("messages").put(new JSONObject().put("id","ui-answer").put("user",false).put("text","下面是可直接保存的页面。\n\n```html\n"+code+"\n```").put("modelId","gpt-6.1-sol").put("completionState","complete"));
   JSONArray all=new JSONArray().put(s);for(int i=0;i<12;i++)all.put(session("设计讨论 "+i,1).put("updatedAt",System.currentTimeMillis()-i*43200000L));install(all);prefs.edit().putString("themeMode","light").commit();

@@ -18,7 +18,7 @@ final class MarkdownMessageView extends LinearLayout {
   if(source==null)source="";
   if(this.source.equals(source)&&getChildCount()>0)return;this.source=source;
   int cursor=0,index=0;
-  for(MarkdownRenderer.Fence fence:MarkdownRenderer.fences(source)){
+  for(MarkdownRenderer.Fence fence:MarkdownRenderer.codeBlocks(source)){
    String prose=source.substring(cursor,fence.start);if(!prose.trim().isEmpty())index=prose(index,prose);
    String raw=source.substring(fence.bodyStart,fence.bodyEnd);
    CodeBlockView code;
