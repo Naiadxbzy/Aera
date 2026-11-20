@@ -49,11 +49,28 @@ public class MainActivity extends AppCompatActivity {
    JSONObject session=MessageEdits.findSession(readSessions(),run.sessionId);
    if(session!=null)renderSessionMessages(session,Math.max(0,session.optJSONArray("messages").length()-40));
    activeReply=new ReplyContext(run.sessionId,run.modelId,run.effort,run.timestamp);activeReply.branchId=run.branchId;activeReply.search=run.search;
-   generationBody=markdownText("");generationBody.setMessageId(run.id);activeReply.visibleRow=assistantRow(generationBody,run.timestamp,run.modelId);messageList.addView(activeReply.visibleRow);
+   generationBody=markdownText("");
+   generationBody.setMessageId(run.id);
+   activeReply.visibleRow=assistantRow(generationBody,run.timestamp,run.modelId);
+   MessageStatusView progress=new MessageStatusView(this,R.drawable.ic_status_reply,true);
+   progress.setTag("generation-status");
+   LinearLayout box=(LinearLayout)activeReply.visibleRow.getChildAt(0);
+   box.addView(progress,0,new LinearLayout.LayoutParams(-2,-2));
+   messageList.addView(activeReply.visibleRow);
   }
-  String text=run.partial.toString(),thought=run.reasoningText.toString();generationBody.setVisibility(text.isEmpty()&&!thought.isEmpty()?View.GONE:View.VISIBLE);renderMarkdown(generationBody,text.isEmpty()?run.status:text);
+  String text=run.partial.toString(),thought=run.reasoningText.toString();
+  MessageStatusView progress=activeReply.visibleRow.findViewWithTag("generation-status");
+  progress.setVisibility(text.isEmpty()&&thought.isEmpty()?View.VISIBLE:View.GONE);
+  if(progress.getVisibility()==View.VISIBLE)UiStyle.textIfChanged(progress,run.status);
+  generationBody.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);
+  if(!text.isEmpty())renderMarkdown(generationBody,text);
   bindReasoning(activeReply.visibleRow,run.id,thought,text.isEmpty(),false,ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol));
-  if((run.search.grounded()||run.search.tavily)&&(!run.status.equals(activeReply.searchStatus)||activeReply.sources!=run.sources)){activeReply.searchStatus=run.status;activeReply.sources=run.sources;refreshSearch(activeReply);}
+  String searchStatus=run.searchStatus.isEmpty()?run.searchNote:run.searchStatus;
+  if(!searchStatus.equals(activeReply.searchStatus)||activeReply.sources!=run.sources){
+   activeReply.searchStatus=searchStatus;
+   activeReply.sources=run.sources;
+   refreshSearch(activeReply);
+  }
   scrollBottom();
  }
  @Override protected void onStop(){ChatGenerationService.detach(generationListener);super.onStop();}
@@ -150,7 +167,75 @@ public class MainActivity extends AppCompatActivity {
   dialog.setOnDismissListener(d->expandedComposerDialog=null);dialog.show();
  }
  private void refreshSearch(ReplyContext reply){if(reply.visibleRow!=null)addSearchCard(reply.visibleRow,reply.searchStatus,reply.sources,"");}
- private void addSearchCard(LinearLayout row,String status,SearchSources sources,String legacy){if(row.getChildCount()==0||!(row.getChildAt(0) instanceof LinearLayout))return;if((status==null||status.isEmpty())&&sources.items.length()==0&&legacy.isEmpty())return;LinearLayout box=(LinearLayout)row.getChildAt(0);View oldHeading=box.findViewWithTag("search-heading"),oldContent=box.findViewWithTag("search-content");boolean expanded=oldContent!=null&&oldContent.getVisibility()==View.VISIBLE;if(oldHeading!=null)box.removeView(oldHeading);if(oldContent!=null)box.removeView(oldContent);TextView heading=label((status==null||status.isEmpty()?"历史搜索来源":status)+" · 点击展开",12,muted,false);heading.setTag("search-heading");heading.setPadding(0,dp(8),0,dp(8));heading.setMinHeight(dp(48));box.addView(heading,0);LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);content.setTag("search-content");content.setVisibility(expanded?View.VISIBLE:View.GONE);box.addView(content,1);for(int i=0;i<sources.items.length();i++){JSONObject source=sources.items.optJSONObject(i);String url=source.optString("url"),domain=Uri.parse(url).getHost();String snippet=source.optString("snippet").replaceAll("\\s+"," ").trim();if(snippet.length()>300)snippet=snippet.substring(0,300)+"…";TextView item=label((i+1)+". "+source.optString("title",domain)+"\n"+domain+(snippet.isEmpty()?"":"\n"+snippet),13,ink,false);item.setPadding(dp(12),dp(10),dp(12),dp(10));item.setMaxLines(7);item.setEllipsize(android.text.TextUtils.TruncateAt.END);item.setBackground(roundDrawable(card,12));item.setContentDescription(item.getText()+"，打开来源");item.setOnClickListener(v->SafeLinks.open(this,url));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.bottomMargin=dp(6);content.addView(item,lp);}String suggestions="";for(int i=0;i<sources.items.length();i++){JSONObject source=sources.items.optJSONObject(i);if(source!=null&&!source.optString("searchSuggestionsHtml").isEmpty()){suggestions=source.optString("searchSuggestionsHtml");break;}}if(!suggestions.isEmpty()){String html=suggestions;TextView entry=label("Google 搜索建议  ›",13,purple,true);entry.setMinHeight(dp(44));entry.setGravity(Gravity.CENTER_VERTICAL);entry.setOnClickListener(v->GoogleSearchSuggestions.show(this,html));content.addView(entry);}if(sources.items.length()==0&&!legacy.isEmpty()){String clean=legacy.trim();if(clean.startsWith("{")||clean.startsWith("["))clean="历史来源格式不可用";else clean=clean.replaceAll("(?m)^\\s*[-#*>]+\\s*","");if(clean.length()>600)clean=clean.substring(0,600)+"…";TextView fallback=label(clean,13,muted,false);fallback.setTextIsSelectable(true);content.addView(fallback);}heading.setOnClickListener(v->content.setVisibility(content.getVisibility()==View.GONE?View.VISIBLE:View.GONE));}
+ private void addSearchCard(LinearLayout row,String status,SearchSources sources,String legacy){
+  if(row.getChildCount()==0||!(row.getChildAt(0) instanceof LinearLayout))return;
+  LinearLayout box=(LinearLayout)row.getChildAt(0);
+  View oldHeading=box.findViewWithTag("search-heading"),oldContent=box.findViewWithTag("search-content");
+  boolean expanded=oldContent!=null&&oldContent.getVisibility()==View.VISIBLE;
+  if(oldHeading!=null)box.removeView(oldHeading);
+  if(oldContent!=null)box.removeView(oldContent);
+  boolean hasDetails=sources.items.length()>0||!legacy.isEmpty();
+  if((status==null||status.isEmpty())&&!hasDetails)return;
+
+  String caption=status==null||status.isEmpty()?"搜索来源":status;
+  if("本次未调用内置搜索".equals(caption))caption="本次未调用联网搜索";
+  MessageStatusView heading=new MessageStatusView(this,R.drawable.ic_status_search,false);
+  heading.setText(caption);
+  heading.setTag("search-heading");
+  LinearLayout.LayoutParams headingParams=new LinearLayout.LayoutParams(-2,-2);
+  headingParams.bottomMargin=dp(8);
+  box.addView(heading,0,headingParams);
+  if(!hasDetails)return;
+
+  LinearLayout content=new LinearLayout(this);
+  content.setOrientation(LinearLayout.VERTICAL);
+  content.setTag("search-content");
+  content.setVisibility(expanded?View.VISIBLE:View.GONE);
+  box.addView(content,1,new LinearLayout.LayoutParams(-1,-2));
+  for(int i=0;i<sources.items.length();i++){
+   JSONObject source=sources.items.optJSONObject(i);
+   if(source==null)continue;
+   String url=source.optString("url"),domain=Uri.parse(url).getHost();
+   String snippet=source.optString("snippet").replaceAll("\\s+"," ").trim();
+   if(snippet.length()>300)snippet=snippet.substring(0,300)+"…";
+   TextView item=label((i+1)+". "+source.optString("title",domain)+"\n"+domain+(snippet.isEmpty()?"":"\n"+snippet),13,ink,false);
+   item.setPadding(dp(12),dp(10),dp(12),dp(10));
+   item.setMaxLines(7);
+   item.setEllipsize(android.text.TextUtils.TruncateAt.END);
+   item.setBackground(roundDrawable(card,12));
+   item.setContentDescription(item.getText()+"，打开来源");
+   item.setOnClickListener(v->SafeLinks.open(this,url));
+   LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);
+   lp.bottomMargin=dp(6);
+   content.addView(item,lp);
+  }
+  for(int i=0;i<sources.items.length();i++){
+   JSONObject source=sources.items.optJSONObject(i);
+   if(source==null||source.optString("searchSuggestionsHtml").isEmpty())continue;
+   String html=source.optString("searchSuggestionsHtml");
+   TextView entry=label("Google 搜索建议  ›",13,purple,true);
+   entry.setMinHeight(dp(44));
+   entry.setGravity(Gravity.CENTER_VERTICAL);
+   entry.setOnClickListener(v->GoogleSearchSuggestions.show(this,html));
+   content.addView(entry);
+   break;
+  }
+  if(sources.items.length()==0&&!legacy.isEmpty()){
+   String clean=legacy.trim();
+   if(clean.startsWith("{")||clean.startsWith("["))clean="历史来源格式不可用";
+   else clean=clean.replaceAll("(?m)^\\s*[-#*>]+\\s*","");
+   if(clean.length()>600)clean=clean.substring(0,600)+"…";
+   TextView fallback=label(clean,13,muted,false);
+   fallback.setTextIsSelectable(true);
+   content.addView(fallback);
+  }
+  heading.setAction(()->{
+   boolean open=content.getVisibility()==View.GONE;
+   content.setVisibility(open?View.VISIBLE:View.GONE);
+   heading.setExpanded(open);
+  });
+  heading.setExpanded(expanded);
+ }
  static JSONArray groundedMessages(JSONArray history,String results)throws JSONException{return SearchGrounding.messages(history,results);}
  private void showModelSelector(){hideKeyboard();ModelPicker.show(this,scoped(),this::refreshModelLabels,()->startActivity(new Intent(this,ProviderListActivity.class)));}
  private boolean isAnthropic(){JSONObject p=activeProvider();String type=(provider+" "+p.optString("name")+" "+p.optString("api",prefs.getString("api",""))+" "+model).toLowerCase(Locale.ROOT);return type.contains("anthropic")||type.contains("claude");}
@@ -297,7 +382,8 @@ public class MainActivity extends AppCompatActivity {
  private void previewAttachment(JSONObject descriptor){hideKeyboard();attachmentUi().preview(descriptor);}
  private String queryName(Uri u){String x="附件";try(android.database.Cursor c=getContentResolver().query(u,null,null,null,null)){if(c!=null&&c.moveToFirst()){int i=c.getColumnIndex(OpenableColumns.DISPLAY_NAME);if(i>=0)x=c.getString(i);}}catch(Exception ignored){}return x;}
  private void applyCustomTheme(){ThemePalette p=ThemePalette.resolve(this);purple=p.primary;page=p.page;card=p.surface;ink=p.ink;muted=p.muted;}
- private boolean preflight(){
+ private boolean preflight(){return preflight(false);}
+ private boolean preflight(boolean skipHostedTools){
   refreshModelLabels();JSONObject p=activeProvider(),m=ModelCapabilities.find(p,model);String problem="";
   try{
    String base=p.optString("api");if(NativeProtocols.nativeProtocol(protocol()))NativeProtocols.endpoint(base,protocol(),model,true);else ChatApiClient.endpoint(base,protocol());
@@ -310,6 +396,7 @@ public class MainActivity extends AppCompatActivity {
   }catch(Exception invalid){problem="请求配置无效："+ApiFailure.local(invalid);}
   if(!problem.isEmpty()){TextView text=label(problem+"\n输入和附件已保留。",15,ink,false);new PanelDialog(this,"发送前需要完成配置","",text).compact().action(AlertDialog.BUTTON_NEGATIVE,"取消",null).action(AlertDialog.BUTTON_NEUTRAL,"思考强度",this::showReasoningSelector).action(AlertDialog.BUTTON_POSITIVE,"选择模型",this::showModelSelector).show();return false;}
   SearchOptions search=SearchOptions.capture(scoped(),protocol());
+  if(skipHostedTools)search=search.withoutHostedTools();
   if(!search.error.isEmpty()||(search.tavily&&search.key.isEmpty())){
    TextView hint=label("当前联网搜索不可用。可以关闭联网继续，本次回答不会使用搜索结果。",15,ink,false);
    new PanelDialog(this,"联网搜索未就绪","输入和附件会保留",hint).compact().action(AlertDialog.BUTTON_NEGATIVE,"取消",null).action(AlertDialog.BUTTON_NEUTRAL,"配置搜索",()->startActivity(new Intent(this,SettingsOptionActivity.class).putExtra("mode","search"))).action(AlertDialog.BUTTON_POSITIVE,"关闭联网继续",()->{scoped().edit().putBoolean("webSearchEnabled",false).apply();refreshModelLabels();sendMessage();}).show();return false;
@@ -376,7 +463,16 @@ public class MainActivity extends AppCompatActivity {
  }
  private void topicFailure(String id,String code){android.util.Log.w("TopicNaming","session="+id+" failure="+code);Toast.makeText(this,"话题命名失败（"+code+"），请在设置中检查供应商、模型、提示词和网络。",Toast.LENGTH_LONG).show();}
  
- private LinearLayout loadingRow(){LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.LEFT|Gravity.CENTER_VERTICAL);row.setPadding(0,dp(5),0,dp(5));TextView t=label(HomeCopy.get(prefs,"thinkingStatus"),15,muted,false);t.setTag("status");t.setPadding(dp(15),dp(11),dp(15),dp(11));t.setBackgroundColor(Color.TRANSPARENT);row.addView(t,new LinearLayout.LayoutParams(-1,-2));return row;}
+ private LinearLayout loadingRow(){
+  LinearLayout row=new LinearLayout(this);
+  row.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
+  row.setPadding(0,dp(5),0,dp(5));
+  MessageStatusView status=new MessageStatusView(this,R.drawable.ic_status_reply,true);
+  status.setText(HomeCopy.get(prefs,"thinkingStatus"));
+  status.setTag("status");
+  row.addView(status,new LinearLayout.LayoutParams(-2,-2));
+  return row;
+ }
  private void setLoading(LinearLayout r,String s){runOnUiThread(()->{if(!isActive((ReplyContext)r.getTag()))return;View v=r.findViewWithTag("status");if(v instanceof TextView)((TextView)v).setText(s);});}
  private void completeReply(ReplyContext reply,String text,boolean error){if(reply.finished)return;if(reply.stream!=null)reply.stream.finish(text);reply.finished=true;reply.cancel.cancel();if(activeReply==reply){activeReply=null;sending=false;updateSendButton();}saveAssistantMessage(reply,text,error);if(reply.visibleRow!=null&&reply.visibleRow.getParent()==messageList){JSONObject session=MessageEdits.findSession(readSessions(),reply.sessionId);JSONArray messages=session==null?null:session.optJSONArray("messages");JSONObject saved=messages==null?null:messages.optJSONObject(messages.length()-1);if(saved!=null){bindMessageActions(reply.visibleRow,reply.sessionId,saved);bindVersions(reply.visibleRow,session,saved);}}scrollBottom();}
  private MarkdownMessageView markdownText(String s){if(markwon==null)markwon=MarkdownRenderer.create(this);MarkdownMessageView view=new MarkdownMessageView(this,markwon);view.setMarkdown(s);return view;}private io.noties.markwon.Markwon markwon;
@@ -434,14 +530,36 @@ public class MainActivity extends AppCompatActivity {
    });
  }
  private void applyMessageEdit(String sessionId,String messageId,String value,boolean retry){
-  if(sending||!sessionId.equals(prefs.getString("currentSessionId","")))return;
-  try{JSONArray sessions=readSessions();JSONObject session=ConversationBranches.edit(sessions,sessionId,messageId,value,retry);if(session==null)return;persistSessions(sessions);restoreSession(session);refreshHistory();if(retry)retryConversation(sessionId);}catch(JSONException e){Toast.makeText(this,"无法保存消息",Toast.LENGTH_SHORT).show();}
+  applyMessageEdit(sessionId,messageId,value,retry,false);
  }
- private void retryConversation(String sessionId){
-  if(sending||!sessionId.equals(prefs.getString("currentSessionId",""))||!preflight())return;
-  follow.begin();ReplyContext request=captureRequest(sessionId);LinearLayout row=loadingRow();row.setTag(request);request.visibleRow=row;messageList.addView(row);activeReply=request;sending=true;updateSendButton();
+ private void applyMessageEdit(String sessionId,String messageId,String value,boolean retry,boolean skipHostedTools){
+  if(sending||!sessionId.equals(prefs.getString("currentSessionId","")))return;
+  if(skipHostedTools&&!preflight(true))return;
+  try{
+   JSONArray sessions=readSessions();
+   JSONObject session=ConversationBranches.edit(sessions,sessionId,messageId,value,retry);
+   if(session==null)return;
+   persistSessions(sessions);
+   restoreSession(session);
+   refreshHistory();
+   if(retry)retryConversation(sessionId,skipHostedTools);
+  }catch(JSONException e){Toast.makeText(this,"无法保存消息",Toast.LENGTH_SHORT).show();}
+ }
+ private void retryConversation(String sessionId){retryConversation(sessionId,false);}
+ private void retryConversation(String sessionId,boolean skipHostedTools){
+  if(sending||!sessionId.equals(prefs.getString("currentSessionId",""))||!preflight(skipHostedTools))return;
+  follow.begin();
+  ReplyContext request=captureRequest(sessionId);
+  if(skipHostedTools)request.search=request.search.withoutHostedTools();
+  LinearLayout row=loadingRow();
+  row.setTag(request);
+  request.visibleRow=row;
+  messageList.addView(row);
+  activeReply=request;
+  sending=true;
+  updateSendButton();
   JSONObject session=MessageEdits.findSession(readSessions(),sessionId);JSONArray history=buildMessages();JSONArray retained=session==null?null:session.optJSONArray("messages");JSONObject last=retained==null?null:retained.optJSONObject(retained.length()-1);
-  if(last!=null&&!last.optBoolean("user"))try{history.put(new JSONObject().put("role","user").put("content","请接着最后一条回复继续回答，不要重复已有内容。"));}catch(JSONException ignored){}
+  if(last!=null&&!last.optBoolean("user")&&!last.optBoolean("error"))try{history.put(new JSONObject().put("role","user").put("content","请接着最后一条回复继续回答，不要重复已有内容。"));}catch(JSONException ignored){}
   String query="";if(retained!=null)for(int i=retained.length()-1;i>=0;i--){JSONObject m=retained.optJSONObject(i);if(m!=null&&m.optBoolean("user")){query=m.optString("text");break;}}
   JSONObject p=activeProvider();launchGeneration(request,p.optString("api"),p.optString("apiKey"),history,session,Collections.emptyMap(),query);
  }
@@ -532,9 +650,25 @@ public class MainActivity extends AppCompatActivity {
   cacheCodeViewStates();if(messageList.getChildCount()>1)messageList.removeViews(1,messageList.getChildCount()-1);JSONArray messages=session.optJSONArray("messages");if(messages==null)return;
   visibleSession=session.optString("id");visibleStart=Math.max(0,start);int end=Math.min(messages.length(),visibleStart+40);
   if(visibleStart>0)addPageButton("查看更早的消息",()->{renderSessionMessages(session,Math.max(0,visibleStart-40));conversationScroll.post(()->conversationScroll.scrollTo(0,0));});
-  for(int i=visibleStart;i<end;i++){JSONObject m=messages.optJSONObject(i);if(m==null)continue;addMessage(m.optString("text"),m.optBoolean("user"),m.optString("attachment",null),m.optLong("timestamp"),m.optString("modelId",m.optString("model","")));
-   View row=messageList.getChildAt(messageList.getChildCount()-1);row.setTag("message:"+m.optString("id"));if(!m.optBoolean("user")){bindReasoning((LinearLayout)row,m.optString("id"),m.optString("reasoningContent"),false,m.optBoolean("interrupted")||m.optBoolean("error"),"summary".equals(m.optString("reasoningKind")));MarkdownMessageView answer=row.findViewWithTag("markdown-message");if(answer!=null)answer.setVisibility(m.optString("text").isEmpty()&&!m.optString("reasoningContent").isEmpty()?View.GONE:View.VISIBLE);}bindMessageActions(row,session.optString("id"),m);bindVersions(row,session,m);
-   if(!m.optBoolean("user")){addSearchCard((LinearLayout)row,m.optString("searchStatus"),m.has("sources")?SearchSources.parse(m.optJSONArray("sources")):SearchSources.legacy(m.optString("searchResults",m.optString("searchText"))),m.optString("searchResults",m.optString("searchText")));bindCompletion((LinearLayout)row,session.optString("id"),m);}
+  for(int i=visibleStart;i<end;i++){
+   JSONObject m=messages.optJSONObject(i);
+   if(m==null)continue;
+   boolean user=m.optBoolean("user"),error=!user&&m.optBoolean("error");
+   addMessage(error?"":m.optString("text"),user,m.optString("attachment",null),m.optLong("timestamp"),m.optString("modelId",m.optString("model","")));
+   LinearLayout row=(LinearLayout)messageList.getChildAt(messageList.getChildCount()-1);
+   row.setTag("message:"+m.optString("id"));
+   if(!user){
+    bindReasoning(row,m.optString("id"),m.optString("reasoningContent"),false,m.optBoolean("interrupted")||error,"summary".equals(m.optString("reasoningKind")));
+    MarkdownMessageView answer=row.findViewWithTag("markdown-message");
+    if(answer!=null)answer.setVisibility(error||m.optString("text").isEmpty()&&!m.optString("reasoningContent").isEmpty()?View.GONE:View.VISIBLE);
+   }
+   bindMessageActions(row,session.optString("id"),m);
+   bindVersions(row,session,m);
+   if(!user){
+    addSearchCard(row,m.optString("searchStatus",m.optString("searchNote")),m.has("sources")?SearchSources.parse(m.optJSONArray("sources")):SearchSources.legacy(m.optString("searchResults",m.optString("searchText"))),m.optString("searchResults",m.optString("searchText")));
+    if(error)bindFailure(row,m);
+    else bindCompletion(row,session.optString("id"),m);
+   }
    JSONArray attachments=m.optJSONArray("attachments");if(m.optBoolean("user")&&attachments!=null)for(int j=0;j<attachments.length();j++)appendAttachment(attachments.optJSONObject(j));
   }
   if(end<messages.length())addPageButton("查看后续消息",()->{renderSessionMessages(session,end);conversationScroll.post(()->conversationScroll.scrollTo(0,0));});
@@ -547,11 +681,28 @@ public class MainActivity extends AppCompatActivity {
   if(view==null){if(markwon==null)markwon=MarkdownRenderer.create(this);view=new ReasoningView(this,markwon,expanded->{reasoningExpanded.put(messageId,expanded);if(reasoningExpanded.size()>160){Iterator<String> keys=reasoningExpanded.keySet().iterator();if(keys.hasNext()){keys.next();keys.remove();}}if(follow!=null)follow.detach();});((LinearLayout)row.getChildAt(0)).addView(view,0,new LinearLayout.LayoutParams(-1,-2));}
   view.bind(text,thinking,interrupted,summary,Boolean.TRUE.equals(reasoningExpanded.get(messageId)));
  }
+ private void bindFailure(LinearLayout row,JSONObject message){
+  LinearLayout box=(LinearLayout)row.getChildAt(0);
+  MessageStatusView status=new MessageStatusView(this,R.drawable.ic_status_warning,false);
+  status.setTag("reply-error");
+  String summary=ApiFailure.summary(errorDetail(message));
+  status.setText(summary);
+  status.setContentDescription(summary+"，查看错误详情");
+  status.setAction(()->showMessageDetails(message));
+  int index=box.indexOfChild(box.findViewWithTag("markdown-message"));
+  box.addView(status,Math.max(0,index),new LinearLayout.LayoutParams(-2,-2));
+ }
+ private static String errorDetail(JSONObject message){
+  String detail=message.optString("finishReason");
+  return detail.isEmpty()&&message.optBoolean("error")?message.optString("text"):detail;
+ }
  private void bindCompletion(LinearLayout row,String sessionId,JSONObject message){
   TextView metadata=row.findViewWithTag("message-metadata");if(metadata==null)return;String state=message.optString("completionState",message.optBoolean("interrupted")?"interrupted":"complete"),note=message.optString("searchNote");
+  if(row.findViewWithTag("search-heading")!=null)note="";
   boolean omitted=message.optInt("omittedMessages")>0;metadata.setVisibility(state.equals("complete")&&note.isEmpty()&&!omitted?View.GONE:View.VISIBLE);metadata.setText((state.equals("complete")?"":new GenerationResult(state,message.optString("finishReason"),message.optJSONObject("usage")).label())+(note.isEmpty()?"":" · "+note));metadata.setTextColor(muted);if(state.equals("complete")&&omitted){metadata.setText("本次已省略较早的上下文 · 查看详情  ›");metadata.setMinHeight(dp(44));metadata.setOnClickListener(v->showMessageDetails(message));}
-  if(state.equals("error")&&message.optString("finishReason").startsWith("web_search_error")){metadata.setVisibility(View.VISIBLE);metadata.setText("联网请求失败 · 关闭联网重试  ›");metadata.setMinHeight(dp(44));metadata.setOnClickListener(v->{scoped().edit().putBoolean("webSearchEnabled",false).apply();refreshModelLabels();retryConversation(sessionId);});}
-  else if(state.equals("error")||state.equals("truncated")||state.equals("interrupted")||state.equals("incomplete")){metadata.setMinHeight(dp(44));metadata.setText(metadata.getText()+"  ›");metadata.setOnClickListener(v->retryConversation(sessionId));}
+  if(state.equals("truncated")||state.equals("interrupted")||state.equals("incomplete")){
+   metadata.setMinHeight(dp(44));metadata.setText(metadata.getText()+"  ›");metadata.setOnClickListener(v->retryConversation(sessionId));
+  }
  }
  private void openSearchResult(String id,String messageId,String query){
   JSONObject session=MessageEdits.findSession(readSessions(),id);if(session==null)return;restoreSession(session);closeHistory();if(messageId.isEmpty())return;
@@ -631,9 +782,23 @@ public class MainActivity extends AppCompatActivity {
  }
  private void showMessageDetails(JSONObject message){
   String time=new SimpleDateFormat("yyyy-MM-dd HH:mm:ss",Locale.getDefault()).format(new Date(message.optLong("timestamp")));
-  String state=message.optString("completionState",message.optBoolean("interrupted")?"interrupted":"complete");
-  TextView details=label("时间："+time+(message.optBoolean("user")?"":"\n模型："+message.optString("modelName",message.optString("modelId"))+"\n状态："+new GenerationResult(state,message.optString("finishReason"),message.optJSONObject("usage")).label()+"\n\n"+usageText(message)+((message.optBoolean("error")||message.optBoolean("interrupted"))&&!message.optString("finishReason").isEmpty()?"\n\n错误 / 中断详情：\n"+message.optString("finishReason"):"")),14,ink,false);details.setText(details.getText()+BuiltinTools.details(message.optJSONArray("toolEvents")));details.setTextIsSelectable(true);details.setPadding(dp(8),dp(8),dp(8),dp(16));ScrollView scroll=new ScrollView(this);scroll.addView(details);
-  new PanelDialog(this,"消息详情","",scroll).compact().action(AlertDialog.BUTTON_POSITIVE,"完成",null).show();
+  boolean error=message.optBoolean("error");
+  String state=message.optString("completionState",error?"error":message.optBoolean("interrupted")?"interrupted":"complete");
+  String detail=errorDetail(message);
+  TextView details=label("时间："+time+(message.optBoolean("user")?"":"\n模型："+message.optString("modelName",message.optString("modelId"))+"\n状态："+new GenerationResult(state,detail,message.optJSONObject("usage")).label()+"\n\n"+usageText(message)+((error||message.optBoolean("interrupted"))&&!detail.isEmpty()?"\n\n错误 / 中断详情：\n"+detail:"")),14,ink,false);
+  details.setText(details.getText()+BuiltinTools.details(message.optJSONArray("toolEvents")));
+  details.setTextIsSelectable(true);
+  details.setPadding(dp(8),dp(8),dp(8),dp(16));
+  ScrollView scroll=new ScrollView(this);
+  scroll.addView(details);
+  PanelDialog dialog=new PanelDialog(this,"消息详情","",scroll).compact().action(AlertDialog.BUTTON_POSITIVE,"完成",null);
+  boolean legacyToolError=!message.has("retryWithoutHostedTools")&&ApiFailure.isToolError(detail)&&detail.contains("协议：responses");
+  if(error&&(message.optBoolean("retryWithoutHostedTools")||legacyToolError)&&ChatApiClient.RESPONSES.equals(protocol())&&
+    message.optString("modelId").equals(model)&&SearchOptions.capture(scoped(),protocol()).hasTools()){
+   String sessionId=prefs.getString("currentSessionId","");
+   dialog.action(AlertDialog.BUTTON_NEUTRAL,"跳过内置工具重试",()->applyMessageEdit(sessionId,message.optString("id"),null,true,true));
+  }
+  dialog.show();
  }
  private void showSessionDetails(JSONObject session){
   JSONArray messages=session.optJSONArray("messages");long input=0,output=0;int measured=0,answers=0;

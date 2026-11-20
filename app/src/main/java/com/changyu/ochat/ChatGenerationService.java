@@ -188,7 +188,8 @@ public final class ChatGenerationService extends Service {
   SearchSources copy=SearchSources.parse(sources.items);
   main.post(()->{if(valid(run)){
    if(run.search.tavily){JSONArray combined=new JSONArray();for(int i=0;i<run.sources.items.length();i++)combined.put(run.sources.items.opt(i));for(int i=0;i<copy.items.length();i++)combined.put(copy.items.opt(i));run.sources=SearchSources.parse(combined);}else run.sources=copy;
-   if(!status.isEmpty()){run.searchStatus=status;status(run,status);}else publish(run);
+   if(!status.isEmpty())run.searchStatus=status;
+   publish(run);
   }});
  }
  private void chat(Run run){
@@ -250,7 +251,11 @@ public final class ChatGenerationService extends Service {
    JSONArray all=SessionRepository.get(prefs).read();JSONObject session=MessageEdits.findSession(all,run.sessionId);
    if(session==null||!run.branchId.equals(session.optString("activeBranchId")))return;
    JSONObject message=new JSONObject().put("id",run.id).put("text",run.partial.toString()).put("user",false).put("timestamp",run.timestamp)
-    .put("modelId",run.modelId).put("reasoningContent",run.reasoningText.toString()).put("reasoningKind",ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol)?"summary":"reasoning").put("error",run.error).put("interrupted",run.stopped).put("searchStatus",run.search.grounded()||run.search.tavily?(run.searchStatus.isEmpty()?run.searchNote:run.searchStatus):"").put("toolEvents",run.toolEvents).put("sources",run.sources.items).put("completionState",run.completionState).put("finishReason",run.finishReason).put("usage",run.usage).put("modelName",run.configuredModel.optString("displayName",run.modelId)).put("estimatedInputTokens",run.contextTokens).put("omittedMessages",run.omittedMessages).put("searchNote",run.searchNote).put("pricing",run.configuredModel);
+    .put("modelId",run.modelId).put("reasoningContent",run.reasoningText.toString()).put("reasoningKind",ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol)?"summary":"reasoning").put("error",run.error).put("interrupted",run.stopped).put("searchStatus",run.searchStatus.isEmpty()?run.searchNote:run.searchStatus).put("toolEvents",run.toolEvents).put("sources",run.sources.items).put("completionState",run.completionState).put("finishReason",run.finishReason).put("usage",run.usage).put("modelName",run.configuredModel.optString("displayName",run.modelId)).put("estimatedInputTokens",run.contextTokens).put("omittedMessages",run.omittedMessages).put("searchNote",run.searchNote).put("pricing",run.configuredModel);
+    if(run.error&&ChatApiClient.RESPONSES.equals(run.protocol)&&run.search.hasTools()&&
+      run.reasoningText.length()==0&&ApiFailure.canRetryWithoutTools(run.finishReason)){
+     message.put("retryWithoutHostedTools",true);
+    }
    if(complete){
     session.remove("pendingReply");JSONArray messages=session.optJSONArray("messages");boolean exists=false;
     if(messages!=null){for(int i=0;i<messages.length();i++){JSONObject old=messages.optJSONObject(i);if(old!=null&&run.id.equals(old.optString("id")))exists=true;}

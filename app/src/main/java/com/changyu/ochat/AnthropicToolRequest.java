@@ -80,9 +80,8 @@ final class AnthropicToolRequest {
   for(int i=0;i<merged.items.length();i++)try{sources.items.put(i,merged.items.get(i));}catch(JSONException ignored){}
   if(!status.isEmpty())sourceStatus=status;
  }
- private String httpError(Response response)throws IOException{
-  String detail=ApiFailure.http(response,ChatApiClient.ANTHROPIC,body,key);
-  return options.hasTools()?BuiltinTools.error(response.code(),ChatApiClient.ANTHROPIC,options)+"\n"+detail:detail;
+ private String httpError(Response response){
+  return ApiFailure.http(response,ChatApiClient.ANTHROPIC,body,key);
  }
- private String safe(String message){return ApiFailure.safe((options.hasTools()?BuiltinTools.error(0,ChatApiClient.ANTHROPIC,options)+"\n":"")+message,key);}
+ private String safe(String message){return ApiFailure.safe(message,key);}
 }

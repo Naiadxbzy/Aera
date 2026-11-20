@@ -12,6 +12,29 @@ public class ApiFailureTest {
   String raw=new JSONObject().put("error",new JSONObject().put("message","Unsupported reasoning.effort; api_key=secret123").put("param","reasoning.effort").put("code","unsupported_value").put("type","invalid_request_error")).toString();
   try(Response r=response(400,raw,"application/json")){String error=ApiFailure.http(r,"responses",body,"secret123");assertTrue(error,error.contains("400"));assertTrue(error.contains("reasoning.effort"));assertTrue(error.contains("unsupported_value"));assertTrue(error.contains("request-123"));assertTrue(error.contains("max_output_tokens=128000"));assertFalse(error.contains("secret123"));assertFalse(error.contains("PRIVATE PROMPT"));}
  }
+ @Test public void sentToolsAreOnlyBlamedWhenTheProviderRejectsThem()throws Exception{
+  JSONObject body=new JSONObject().put("tools",new JSONArray().put(new JSONObject().put("type","code_interpreter")));
+  String error="{\"error\":{\"message\":\"unsupported tool\",\"param\":\"tools[0].type\"}}";
+  try(Response r=response(400,error,"application/json")){
+   String detail=ApiFailure.http(r,"responses",body,"");
+   assertTrue(ApiFailure.isToolError(detail));
+   assertTrue(ApiFailure.canRetryWithoutTools(detail));
+   assertTrue(detail.contains("tools=[code_interpreter]"));
+  }
+  try(Response r=response(502,error,"application/json")){
+   String detail=ApiFailure.http(r,"responses",body,"");
+   assertFalse(ApiFailure.isToolError(detail));
+   assertTrue(ApiFailure.canRetryWithoutTools(detail));
+   assertEquals("接口错误（502） · 服务暂不可用",ApiFailure.summary(detail));
+  }
+  String badModel="{\"error\":{\"message\":\"unsupported model\",\"param\":\"model\"}}";
+  try(Response r=response(400,badModel,"application/json")){
+   String detail=ApiFailure.http(r,"responses",body,"");
+   assertFalse(ApiFailure.isToolError(detail));
+   assertFalse(ApiFailure.canRetryWithoutTools(detail));
+   assertTrue(detail.contains("unsupported model"));
+  }
+ }
  @Test public void nativeFieldViolationsAndNestedResponseAreReadable()throws Exception{
   JSONObject error=new JSONObject("{\"error\":{\"code\":400,\"status\":\"INVALID_ARGUMENT\",\"message\":\"Bad thinkingConfig\",\"details\":[{\"fieldViolations\":[{\"field\":\"generationConfig.thinkingConfig\",\"description\":\"unsupported thinkingLevel\"}]}]}}");
   String result=ApiFailure.provider(new JSONObject().put("response",error));assertTrue(result.contains("thinkingConfig"));assertTrue(result.contains("unsupported thinkingLevel"));assertTrue(result.contains("INVALID_ARGUMENT"));

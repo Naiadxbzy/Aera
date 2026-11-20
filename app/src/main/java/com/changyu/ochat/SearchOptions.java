@@ -25,8 +25,13 @@ final class SearchOptions {
   return id.equals("gpt-5-search-api")||id.equals("gpt-4o-search-preview")||id.equals("gpt-4o-mini-search-preview");
  }
  /** A failed external search must not disable separately enabled hosted tools. */
- SearchOptions withoutSearch(){return new SearchOptions(this);}
- private SearchOptions(SearchOptions source){key=source.key;count=source.count;depth=source.depth;builtin=false;tavily=false;urlContext=source.urlContext;codeExecution=source.codeExecution;error="";}
+ SearchOptions withoutSearch(){return new SearchOptions(this,false);}
+ SearchOptions withoutHostedTools(){return new SearchOptions(this,true);}
+ private SearchOptions(SearchOptions source,boolean skipHosted){
+  key=source.key;count=source.count;depth=source.depth;builtin=false;
+  tavily=skipHosted&&source.tavily;urlContext=!skipHosted&&source.urlContext;
+  codeExecution=!skipHosted&&source.codeExecution;error="";
+ }
  boolean hasTools(){return builtin||urlContext||codeExecution;}
  boolean grounded(){return builtin||urlContext;}
  static SearchOptions capture(SharedPreferences p,String protocol){return capture(p,protocol,p.getString("modelId",""));}

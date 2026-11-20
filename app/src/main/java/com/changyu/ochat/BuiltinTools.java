@@ -24,9 +24,39 @@ final class BuiltinTools {
   }else if(ChatApiClient.CHAT_COMPLETIONS.equals(protocol)&&options.builtin)body.put("web_search_options",new JSONObject());
   return body;
  }
- static String error(int code,String protocol,SearchOptions options){
-  String prefix=options.builtin&&!options.codeExecution&&!options.urlContext?"web_search_error":"builtin_tools_error";
-  return prefix+"："+(code>0?"接口错误（"+code+"）":"请求未完成")+"。请核对供应商与模型是否支持所选内置工具、工具权限及计费。Chat Completions 内置搜索需要支持搜索的专用模型；普通模型可使用 Tavily。协议："+protocol+"。";
+ static java.util.Set<String> sentNames(JSONObject body){
+  java.util.Set<String> names=new java.util.LinkedHashSet<>();
+  if(body==null)return names;
+  if(body.has("web_search_options"))names.add("web_search_options");
+  JSONArray tools=body.optJSONArray("tools");
+  for(int i=0;tools!=null&&i<tools.length();i++){
+   JSONObject tool=tools.optJSONObject(i);
+   if(tool==null)continue;
+   String name=tool.optString("name",tool.optString("type"));
+   if(!name.isEmpty())names.add(name);
+   else for(String entry:new String[]{"googleSearch","urlContext","codeExecution"})if(tool.has(entry))names.add(entry);
+  }
+  return names;
+ }
+ static String rejection(int status,JSONObject payload,JSONObject sent){
+  if(status!=400&&status!=403&&status!=422)return "";
+  java.util.Set<String> names=sentNames(sent);
+  if(names.isEmpty()||payload==null)return "";
+  JSONObject error=payload.optJSONObject("error");
+  if(error==null)error=payload;
+  String field=error.optString("param").toLowerCase(java.util.Locale.ROOT);
+  String message=error.optString("message").toLowerCase(java.util.Locale.ROOT);
+  boolean toolField=field.equals("tools")||field.startsWith("tools[")||field.startsWith("tools.")||
+   field.equals("tool_choice")||field.equals("web_search_options")||field.startsWith("web_search_options.");
+  if(!toolField){
+   boolean namedTool=false;
+   for(String name:names)if(message.contains(name.toLowerCase(java.util.Locale.ROOT)))namedTool=true;
+   boolean rejected=message.contains("unsupported")||message.contains("not supported")||message.contains("not allowed")||
+    message.contains("unknown tool")||message.contains("permission denied");
+   if(!namedTool||!rejected)return "";
+  }
+  boolean searchOnly=names.size()==1&&(names.iterator().next().startsWith("web_search")||names.contains("googleSearch"));
+  return searchOnly?"web_search_error":"builtin_tools_error";
  }
  static String details(JSONArray events){
   if(events==null||events.length()==0)return "";StringBuilder text=new StringBuilder("\n\n工具记录：");
