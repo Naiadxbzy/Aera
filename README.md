@@ -30,6 +30,19 @@ Aera 是一款 Android 端大模型对话客户端，支持自定义模型供应
 - 支持多会话并行生成、当前会话消息排队、前台服务后台生成与可选 Shizuku 省电豁免，详情见[后台连接说明](docs/background-connection.md)。
 - 支持浅色、深色与跟随系统外观，可自定义主题色、背景色、表面色、文字色、思考动画配色及新对话欢迎页。
 
+## 图片与视频生成
+
+在聊天页的「对话操作 → 图片与视频」选择生成类型、供应商和模型 ID，填写提示词后提交。画幅可按模型选择，视频可另外设置时长。
+
+| 供应商 | 图片 | 视频 |
+| --- | --- | --- |
+| OpenAI 或兼容供应商 | `/images/generations`，OpenAI 模型可使用 `gpt-image-1` | 实现 `/videos` 创建、查询和下载协议的兼容供应商 |
+| Google Gemini 原生协议 | `gemini-3.1-flash-image` | `gemini-omni-1.2-flash` |
+
+生成任务在前台服务中运行。返回聊天页后，可重新打开「图片与视频」查看进度、预览结果或保存文件。已取得远程任务编号的任务中断后，可通过「继续获取」查询原任务。停止操作会结束本机接收，供应商仍可能继续生成。生成文件保存在应用私有目录，可通过「保存到…」导出。
+
+接口说明见 [OpenAI 图片生成](https://developers.openai.com/api/docs/guides/image-generation)、[Gemini 图片生成](https://aistudio.google.com/docs/image-generation)与 [Gemini Omni 视频生成](https://aistudio.google.com/docs/omni)。
+
 ## 文档与图片输入
 
 - 支持通过系统文件选择器、相册或系统分享导入图片、PDF、DOCX、XLSX、PPTX 与纯文本文件。系统分享导入的内容直接进入当前对话输入区并保留已有草稿，点击发送后正式提交或入队。

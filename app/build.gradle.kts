@@ -26,8 +26,8 @@ android {
         applicationId = "com.changyu.ochat"
         minSdk = 24
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.2.1"
+        versionCode = 7
+        versionName = "1.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
