@@ -42,7 +42,13 @@ public class ButtonContrastRegressionTest {
  private void activity(Class<? extends Activity> type,String mode,String... actions){
   Context c=ins.getTargetContext();Intent intent=new Intent(c,type).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);if(mode!=null)intent.putExtra("mode",mode);
   Activity activity=ins.startActivitySync(intent);ins.waitForIdleSync();
-  try{ins.runOnMainSync(()->{for(String action:actions)contrast(find(activity.getWindow().getDecorView(),action));});}
+  try{ins.runOnMainSync(()->{
+   for(String action:actions){
+    View button=find(activity.getWindow().getDecorView(),action);
+    assertNotNull(type.getSimpleName()+" · "+action,button);
+    contrast(button);
+   }
+  });}
   finally{ins.runOnMainSync(activity::finish);ins.waitForIdleSync();}
  }
  @Test public void actualActionColorsInBothModesAndOverrides(){
@@ -63,8 +69,8 @@ public class ButtonContrastRegressionTest {
     AlertDialog ordinary=PaletteDialogs.builder(c).setTitle("Confirmation").setMessage("No editor").setNegativeButton("Cancel",null).setPositiveButton("Save",null).create();
     assertFalse(ordinary.isShowing());contrast(ordinary.getButton(-1));contrast(ordinary.getButton(-2));ordinary.dismiss();
    });
-   activity(MainActivity.class,null,"发送消息","新建对话","展开输入框");
-   activity(SettingsActivity.class,null,"手动添加模型 ID","Fetch Models","保存供应商");
+   activity(MainActivity.class,null,"发送消息","新建对话","展开输入框","插入提示词");
+   activity(SettingsActivity.class,null,"手动添加模型 ID","获取模型 / 测试连接","保存供应商");
    activity(SettingsOptionActivity.class,"conversation","保存并返回");
    activity(SettingsOptionActivity.class,"topic","测试命名模型","保存并返回");
    activity(SettingsOptionActivity.class,"theme","保存并重启","恢复自适应默认颜色","恢复默认首页文字");

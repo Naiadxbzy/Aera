@@ -1,7 +1,10 @@
 package com.changyu.ochat;
 
+import android.app.Instrumentation;
 import android.content.*;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.*;
 import android.widget.*;
 import androidx.core.content.FileProvider;
@@ -79,6 +82,27 @@ public class FinalFlowRegressionTest {
    transport.callback.onDelta("still a");transport.callback.onDone();await(()->ChatGenerationService.activeCount()==0);
   }
  }
+ @Test public void finishingServiceDoesNotCancelTheNextRun()throws Exception{
+  JSONObject firstSession=session("first",1),nextSession=session("next",1);
+  install(new JSONArray().put(firstSession).put(nextSession));
+  Transport first=new Transport(),next=new Transport();
+  ChatGenerationService.Run firstRun=run(firstSession,first),nextRun=run(nextSession,next);
+  Instrumentation instrumentation=InstrumentationRegistry.getInstrumentation();
+  instrumentation.runOnMainSync(()->ChatGenerationService.launch(context,firstRun));
+  assertTrue(first.started.await(8,TimeUnit.SECONDS));
+  instrumentation.runOnMainSync(()->{
+   first.callback.onDelta("first answer");
+   first.callback.onDone();
+   new Handler(Looper.getMainLooper()).post(()->ChatGenerationService.launch(context,nextRun));
+  });
+  assertTrue("The next run reaches its transport",next.started.await(8,TimeUnit.SECONDS));
+  next.callback.onDelta("next answer");
+  next.callback.onDone();
+  await(()->ChatGenerationService.activeCount()==0);
+  JSONObject saved=MessageEdits.findSession(SessionRepository.get(prefs).read(),"next");
+  assertEquals("next answer",saved.getJSONArray("messages").getJSONObject(1).getString("text"));
+ }
+
  @Test public void queuePersistsSeparatelyFromActiveConversationUntilPromoted()throws Exception{
   JSONObject a=session("a",1);install(new JSONArray().put(a));JSONObject stored=SessionRepository.get(prefs).read().getJSONObject(0);
   JSONObject message=new JSONObject().put("id","queued").put("text","next").put("user",true);JSONObject queued=new JSONObject().put("message",message).put("config",SessionConfig.capture(prefs));

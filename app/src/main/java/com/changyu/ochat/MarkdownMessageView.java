@@ -10,17 +10,28 @@ import java.util.*;
 /** Reuses each code viewport across streamed snapshots so expansion and scroll positions stay stable. */
 final class MarkdownMessageView extends LinearLayout {
  private final Markwon renderer;private final ThemePalette palette;
- private String source="",messageId="";private float size=16,extra=0,multiplier=1.18f;
+ private String source="",messageId="";private boolean streamingMode;private float size=16,extra=0,multiplier=1.18f;
  MarkdownMessageView(Context context,Markwon renderer){
   super(context);this.renderer=renderer;palette=ThemePalette.resolve(context);setOrientation(VERTICAL);setTag("markdown-message");
  }
- void setMarkdown(String source){
+ void setStreamingMarkdown(String source){setMarkdown(source,true);}
+ void setMarkdown(String source){setMarkdown(source,false);}
+ private void setMarkdown(String source,boolean streaming){
   if(source==null)source="";
-  if(this.source.equals(source)&&getChildCount()>0)return;this.source=source;
+  if(this.source.equals(source)&&streamingMode==streaming&&getChildCount()>0)return;this.source=source;streamingMode=streaming;
   int cursor=0,index=0;
   for(MarkdownRenderer.Fence fence:MarkdownRenderer.codeBlocks(source)){
    String prose=source.substring(cursor,fence.start);if(!prose.trim().isEmpty())index=prose(index,prose);
-   String raw=source.substring(fence.bodyStart,fence.bodyEnd);
+   int end=fence.bodyEnd;
+   if(streaming&&!fence.closed&&!fence.literalMarkup){
+    int line=source.lastIndexOf('\n',end-1)+1;
+    if(line>=fence.bodyStart&&line<end){
+     String tail=source.substring(line,end).trim();
+     char marker=source.charAt(fence.start);
+     if(!tail.isEmpty()&&tail.chars().allMatch(value->value==marker))end=line;
+    }
+   }
+   String raw=source.substring(fence.bodyStart,end);
    CodeBlockView code;
    if(index<getChildCount()&&getChildAt(index) instanceof CodeBlockView)code=(CodeBlockView)getChildAt(index);else{
     if(index<getChildCount())removeViewAt(index);code=new CodeBlockView(getContext());
@@ -38,7 +49,7 @@ final class MarkdownMessageView extends LinearLayout {
    if(index<getChildCount())removeViewAt(index);text=new ProseText(getContext());text.setTextColor(palette.ink);text.setLinkTextColor(palette.primary);
    addView(text,index,new LayoutParams(-1,-2));
   }
-  if(!source.equals(text.rendered)){text.setTextSize(size);text.setLineSpacing(extra,multiplier);MarkdownRenderer.render(renderer,text,source);text.rendered=source;}return index+1;
+  if(!source.equals(text.rendered)){text.setTextSize(size);text.setLineSpacing(extra,multiplier);try{MarkdownRenderer.render(renderer,text,source);}catch(RuntimeException malformed){android.util.Log.w("Markdown","Unable to render message markup",malformed);text.setText(source);}text.rendered=source;}return index+1;
  }
  void setTextSize(float size){this.size=size;for(int i=0;i<getChildCount();i++)if(getChildAt(i) instanceof TextView)((TextView)getChildAt(i)).setTextSize(size);}
  void setLineSpacing(float extra,float multiplier){this.extra=extra;this.multiplier=multiplier;for(int i=0;i<getChildCount();i++)if(getChildAt(i) instanceof TextView)((TextView)getChildAt(i)).setLineSpacing(extra,multiplier);}

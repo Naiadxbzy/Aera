@@ -55,12 +55,26 @@ final class ApiFailure {
   if(isToolError(detail))return "内置工具请求失败";
   return "回复生成失败";
  }
+ static boolean isProviderError(JSONObject root,String type){
+  if(root.has("error")&&!root.isNull("error"))return true;
+  return "error".equals(type)||"response.failed".equals(type)||"failed".equals(root.optString("status"))
+   ||root.has("detail")&&!root.has("choices")&&!root.has("candidates")&&!root.has("output")
+   ||root.has("code")&&root.has("message")&&!root.has("choices")&&!root.has("candidates")&&!root.has("output");
+ }
+ static boolean rejectsStreamUsage(int status,String detail){
+  if(status!=400&&status!=422)return false;
+  String value=detail.toLowerCase(java.util.Locale.ROOT);
+  String diagnostics=value.split("\n本次请求：",2)[0];
+  return (diagnostics.contains("stream_options")||diagnostics.contains("include_usage"))
+   &&(diagnostics.contains("unsupported")||diagnostics.contains("not supported")||diagnostics.contains("not allowed")
+    ||diagnostics.contains("unrecognized")||diagnostics.contains("unknown")||diagnostics.contains("extra_forbidden"));
+ }
  static String provider(JSONObject root){
   JSONObject response=root.optJSONObject("response");if(response!=null)root=response;
   Object value=root.opt("error");if(value==null||value==JSONObject.NULL)value=root;
   StringBuilder out=new StringBuilder("provider_error：");
   if(value instanceof JSONObject){
-   JSONObject e=(JSONObject)value;String message=e.optString("message","");out.append(message.isEmpty()?"服务端拒绝或未能完成请求":shorten(message,1800));
+   JSONObject e=(JSONObject)value;String message=e.optString("message",e.optString("detail",e.optString("error_description","")));out.append(message.isEmpty()?"服务端拒绝或未能完成请求":shorten(message,1800));
    for(String k:new String[]{"code","type","param","status"}){Object v=e.opt(k);if(v!=null&&v!=JSONObject.NULL&&!(v instanceof JSONObject)&&!(v instanceof JSONArray))out.append("\n").append(k).append("：").append(shorten(String.valueOf(v),240));}
    JSONArray details=e.optJSONArray("details");
    if(details!=null)for(int i=0;i<Math.min(6,details.length());i++){

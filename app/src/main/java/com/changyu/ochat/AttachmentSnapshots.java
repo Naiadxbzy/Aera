@@ -8,7 +8,8 @@ import java.util.*;
 
 /** Keep large immutable request snapshots out of SharedPreferences and saved instance state. */
 final class AttachmentSnapshots {
- static final int INLINE_CHARS=128*1024;
+ static final int INLINE_CHARS=128*1024, MAX_PAYLOAD_CHARS=2*1024*1024;
+ static long requestCharacterLimit(){return Math.max(2L*1024*1024,Math.min(12L*1024*1024,Runtime.getRuntime().maxMemory()/32));}
  static final long ORPHAN_GRACE_MILLIS=24L*60*60*1000;
  private static final String KEY_PATTERN="[a-f0-9-]{36}\\.(?:payload|pdf)";
  static final String PDF_MARKER="\u0000OChatPdf:";
@@ -77,15 +78,32 @@ final class AttachmentSnapshots {
   }finally{partial.delete();if(!saved)target.delete();}
  }
  static String read(Context context,JSONObject descriptor)throws IOException{
-  if(descriptor.has("payloadSnapshot"))return descriptor.optString("payloadSnapshot");
+  if(descriptor.has("payloadSnapshot")){
+   String payload=descriptor.optString("payloadSnapshot");
+   if(payload.length()>MAX_PAYLOAD_CHARS&&!payload.startsWith("data:application/pdf;base64,"))throw oversized();
+   return payload;
+  }
   String key=descriptor.optString(FILE);if(key.isEmpty())return null;
   keepAlive(descriptor);File file=resolve(context,key);if(!file.isFile())throw new IOException("已保存的附件内容不可用，请重新添加附件");
   if(key.endsWith(".pdf"))return PDF_MARKER+key;
+  if(file.length()>MAX_PAYLOAD_CHARS&&AttachmentBatch.isPdf(descriptor.optString("mime"),descriptor.optString("displayName"))){
+   try(InputStream legacy=new BufferedInputStream(new FileInputStream(file))){
+    byte[] prefix="data:application/pdf;base64,".getBytes(StandardCharsets.US_ASCII);
+    for(byte c:prefix)if(legacy.read()!=(c&255))throw oversized();
+    try(InputStream decoded=new android.util.Base64InputStream(legacy,android.util.Base64.DEFAULT)){
+     return capturePdf(context,descriptor,decoded);
+    }
+   }catch(Exception invalid){
+    if(invalid instanceof IOException)throw (IOException)invalid;
+    throw new IOException("旧版 PDF 快照不可读取",invalid);
+   }
+  }
   try(Reader input=new InputStreamReader(new FileInputStream(file),StandardCharsets.UTF_8)){
    StringBuilder out=new StringBuilder();char[] buffer=new char[8192];int count;
-   while((count=input.read(buffer))!=-1){checkCancelled();out.append(buffer,0,count);}return out.toString();
+   while((count=input.read(buffer))!=-1){checkCancelled();if(out.length()+count>MAX_PAYLOAD_CHARS)throw oversized();out.append(buffer,0,count);}return out.toString();
   }
  }
+ private static IOException oversized(){return new IOException("附件快照过大，请重新选择原文件。");}
  /** Only removes our private snapshot, never an original or provider-owned attachment. */
  static void discard(Context context,JSONObject descriptor){
   delete(context,descriptor.optString(FILE));descriptor.remove(FILE);descriptor.remove(CHARS);descriptor.remove("payloadSnapshot");

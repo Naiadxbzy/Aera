@@ -7,25 +7,40 @@ import java.util.regex.*;
 /** Only provider-returned, validated sources. Never infer citations from answer text. */
 final class SearchSources {
  final JSONArray items=new JSONArray();
+ private int revision;
+ int revision(){return revision;}
+ private static final int MAX_SOURCES=80;
  static SearchSources parse(JSONArray array){
   SearchSources out=new SearchSources();Map<String,JSONObject> seen=new LinkedHashMap<>();
   if(array!=null)for(int i=0;i<array.length();i++){
-   JSONObject x=array.optJSONObject(i);if(x==null)continue;String url=x.optString("url").trim();if(!MarkdownRenderer.isSafeLink(url))continue;
-   String host=android.net.Uri.parse(url).getHost(),title=x.optString("title","").trim(),snippet=x.optString("content",x.optString("snippet"));
+   JSONObject x=array.optJSONObject(i);if(x==null)continue;String url=x.optString("url").trim();if(url.length()>4096||!MarkdownRenderer.isSafeLink(url))continue;
+   String host=android.net.Uri.parse(url).getHost(),title=bounded(x.optString("title","").trim(),500),snippet=bounded(x.optString("content",x.optString("snippet")),4000);
    try{
     JSONObject source=seen.get(url);
     if(source!=null){if(!title.isEmpty()&&source.optString("title").equals(host))source.put("title",title);if(source.optString("snippet").isEmpty()&&!snippet.isEmpty())source.put("snippet",snippet);}
-    else{source=new JSONObject().put("title",title.isEmpty()?host:title).put("url",url).put("snippet",snippet);seen.put(url,source);out.items.put(source);}
-    if(!x.optString("searchSuggestionsHtml").isEmpty())source.put("searchSuggestionsHtml",x.optString("searchSuggestionsHtml"));
+    else{if(seen.size()>=MAX_SOURCES)continue;source=new JSONObject().put("title",title.isEmpty()?host:title).put("url",url).put("snippet",snippet);seen.put(url,source);out.items.put(source);}
+    String html=x.optString("searchSuggestionsHtml");if(!html.isEmpty()&&html.length()<=128*1024)source.put("searchSuggestionsHtml",html);
    }catch(JSONException ignored){}
   }
   return out;
  }
+ private static String bounded(String value,int limit){return value.length()<=limit?value:value.substring(0,limit);}
  void collect(JSONObject value){
-  if(value==null)return;JSONArray combined=new JSONArray();for(int i=0;i<items.length();i++)combined.put(items.opt(i));collectValue(value,combined,0);
-  SearchSources parsed=parse(combined);String suggestions=suggestions(value,0);
-  if(!suggestions.isEmpty()&&parsed.items.length()>0)try{parsed.items.getJSONObject(0).put("searchSuggestionsHtml",suggestions);}catch(JSONException ignored){}
+  if(value==null)return;
+  JSONArray added=new JSONArray();
+  collectValue(value,added,0);
+  String suggestions=suggestions(value,0);
+  if(added.length()==0&&suggestions.isEmpty())return;
+  JSONArray combined=new JSONArray();
+  for(int i=0;i<items.length();i++)combined.put(items.opt(i));
+  for(int i=0;i<added.length();i++)combined.put(added.opt(i));
+  SearchSources parsed=parse(combined);
+  if(!suggestions.isEmpty()&&suggestions.length()<=128*1024&&parsed.items.length()>0){
+   try{parsed.items.getJSONObject(0).put("searchSuggestionsHtml",suggestions);}catch(JSONException ignored){}
+  }
+  if(parsed.items.toString().equals(items.toString()))return;
   for(int i=0;i<parsed.items.length();i++)try{items.put(i,parsed.items.get(i));}catch(JSONException ignored){}
+  revision++;
  }
  private static final String[] FIELDS={"output","content","annotations","part","item","response","annotation","citation","citations","delta","message","choices","candidates","groundingMetadata","groundingChunks","action","sources","urlContextMetadata","urlMetadata"};
  private static void collectValue(Object value,JSONArray out,int depth){

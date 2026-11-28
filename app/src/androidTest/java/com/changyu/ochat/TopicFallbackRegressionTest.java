@@ -27,6 +27,7 @@ public class TopicFallbackRegressionTest {
   withActivity((activity,prefs)->{
    for(int mode=0;mode<3;mode++){
     prefs.edit().clear().putBoolean("topicEnabled",mode!=0).putString("api",mode==2?"http://":"").putString("apiKey","test").putString("modelId",mode==2?"model":"").commit();
+    SessionRepository.get(prefs).replace(new JSONArray());
     invoke(activity,"saveCurrentMessage",new Class[]{String.class,boolean.class,String.class},"  first message  ",true,null);
     JSONObject first=session(prefs);assertEquals("first message",first.getString("title"));assertTrue(first.getBoolean("titleFallback"));
     invoke(activity,"saveCurrentMessage",new Class[]{String.class,boolean.class,String.class},"later message",true,null);
@@ -59,15 +60,15 @@ public class TopicFallbackRegressionTest {
  private void withActivity(Checked test)throws Exception {
   // Isolated preferences and an unattached Activity keep these persistence tests offline.
   SharedPreferences prefs=InstrumentationRegistry.getInstrumentation().getTargetContext().getSharedPreferences("topic-fallback-regression",Context.MODE_PRIVATE);
-  prefs.edit().clear().commit();Throwable[] failure={null};
+  SessionRepository.get(prefs).flush();prefs.edit().clear().commit();Throwable[] failure={null};
   InstrumentationRegistry.getInstrumentation().runOnMainSync(()->{try{
    MainActivity activity=new MainActivity();Field f=MainActivity.class.getDeclaredField("prefs");f.setAccessible(true);f.set(activity,prefs);test.run(activity,prefs);
   }catch(Throwable e){failure[0]=e;}});
-  prefs.edit().clear().commit();if(failure[0]!=null)throw new AssertionError(failure[0]);
+  SessionRepository.get(prefs).flush();prefs.edit().clear().commit();if(failure[0]!=null)throw new AssertionError(failure[0]);
  }
  private static JSONObject message(String text)throws Exception{return new JSONObject().put("text",text).put("user",true);}
- private static JSONObject session(SharedPreferences p)throws Exception{return new JSONArray(p.getString("sessions","[]")).getJSONObject(0);}
- private static void store(SharedPreferences p,JSONObject s){p.edit().putString("sessions",new JSONArray().put(s).toString()).putString("currentSessionId","legacy").commit();}
+ private static JSONObject session(SharedPreferences p)throws Exception{return SessionRepository.get(p).read().getJSONObject(0);}
+ private static void store(SharedPreferences p,JSONObject s){SessionRepository.get(p).replace(new JSONArray().put(s));p.edit().putString("currentSessionId","legacy").commit();}
  private static void request(MainActivity a)throws Exception{invoke(a,"requestTopicTitle",new Class[]{String.class,String.class},"original message","legacy");}
  private static Object invoke(MainActivity a,String name,Class<?>[] types,Object...args)throws Exception{Method m=MainActivity.class.getDeclaredMethod(name,types);m.setAccessible(true);return m.invoke(a,args);}
 }

@@ -3,7 +3,16 @@ package com.changyu.ochat;
 import android.content.*;import android.app.AlertDialog;import android.graphics.*;import android.graphics.drawable.GradientDrawable;import android.net.Uri;import android.os.*;import android.provider.OpenableColumns;import android.text.Html;import android.text.InputType;import android.view.*;import android.view.inputmethod.InputMethodManager;import android.widget.*;import androidx.annotation.Nullable;import androidx.appcompat.app.AppCompatActivity;import androidx.appcompat.widget.SwitchCompat;import androidx.core.view.ViewCompat;import androidx.core.view.WindowInsetsCompat;import androidx.drawerlayout.widget.DrawerLayout;import org.json.*;import java.io.*;import java.nio.charset.StandardCharsets;import java.text.SimpleDateFormat;import java.util.*;
 
 public class MainActivity extends AppCompatActivity {
- private int ink=Color.rgb(36,37,43),muted=Color.rgb(119,121,131),purple=Color.rgb(103,80,164),page=Color.rgb(250,248,252),card=Color.WHITE; private static final int PICK_ATTACHMENT=41;
+ private int ink=Color.rgb(36,37,43),muted=Color.rgb(119,121,131),purple=Color.rgb(103,80,164),page=Color.rgb(250,248,252),card=Color.WHITE; private static final int PICK_ATTACHMENT=41, EXPORT_MARKDOWN=83;
+ private final Handler draftHandler=new Handler(Looper.getMainLooper());
+ private final Runnable saveDraft=this::persistComposerDraft;
+ private String draftSessionId="",attachmentPickerSession="";
+ private boolean draftsReady,restoringDraft;
+ private EditText expandedDraftEditor;
+ private ConversationFindBar conversationFind;
+ private View composerArea;
+ private static final java.util.concurrent.ExecutorService MARKDOWN_EXPORTS=java.util.concurrent.Executors.newSingleThreadExecutor();
+ private MarkdownTarget markdownTarget;
  private AttachmentUi attachmentUi;
  private final ArrayDeque<IncomingShare.Request> attachmentImports=new ArrayDeque<>();private IncomingShare.Request activeAttachmentImport;private boolean sharedIntentConsumed;
  private LinearLayout messageList,attachmentPreview,historyList;private ScrollView conversationScroll;private EditText composer;private TextView modelLabel,modelSelector,conversationTitle;private SwitchCompat webSwitch;private String provider="OpenAI Compatible",model="gpt-4o-mini",reasoning="default";private final List<JSONObject> pendingAttachments=new ArrayList<>();private final Map<String,String> preparedAttachments=new HashMap<>();private boolean attachmentLoading;private volatile int attachmentGeneration;private final java.util.concurrent.ExecutorService attachmentWorker=java.util.concurrent.Executors.newSingleThreadExecutor();private java.util.concurrent.Future<?> attachmentTask;private LinearLayout attachmentChoices;private android.animation.ValueAnimator attachmentAnimation;private boolean choicesOpen;private SharedPreferences prefs;private final ChatApiClient.CancellationHandle topicCancellation=new ChatApiClient.CancellationHandle();private final ChatApiClient apiClient=new ChatApiClient(topicCancellation);private boolean sending; private final Set<String> topicRequestsInFlight=new HashSet<>();
@@ -20,35 +29,55 @@ public class MainActivity extends AppCompatActivity {
   if(modelLabel!=null)UiStyle.textIfChanged(modelLabel,ReasoningSheet.label(reasoning)+"  ›");
   if(webSwitch!=null&&webSwitch.isChecked()!=config.getBoolean("webSearchEnabled",false))webSwitch.setChecked(config.getBoolean("webSearchEnabled",false));
  }
- @Override protected void onDestroy(){if(isFinishing()&&!isChangingConfigurations())SessionLaunchPolicy.markTaskRemoved();if(follow!=null)follow.cancel();topicCancellation.cancel();if(prefs!=null)prefs.unregisterOnSharedPreferenceChangeListener(modelPreferences);ChatGenerationService.detach(generationListener);if(activeReply!=null&&generation==null){stopReply();}attachmentGeneration++;if(attachmentUi!=null)attachmentUi.close();if(historyBrowser!=null)historyBrowser.close();attachmentWorker.shutdownNow();if(attachmentAnimation!=null)attachmentAnimation.cancel();super.onDestroy();}
+ @Override protected void onDestroy(){if(isFinishing()&&!isChangingConfigurations())SessionLaunchPolicy.markTaskRemoved();if(follow!=null)follow.cancel();topicCancellation.cancel();if(prefs!=null)prefs.unregisterOnSharedPreferenceChangeListener(modelPreferences);ChatGenerationService.detach(generationListener);if(activeReply!=null&&generation==null){stopReply();}attachmentGeneration++;if(attachmentUi!=null)attachmentUi.close();if(historyBrowser!=null)historyBrowser.close();if(conversationFind!=null)conversationFind.close();draftsReady=false;draftHandler.removeCallbacks(saveDraft);attachmentWorker.shutdownNow();if(attachmentAnimation!=null)attachmentAnimation.cancel();super.onDestroy();}
  private ChatGenerationService.Run generation;private MarkdownMessageView generationBody;private final Map<String,Bundle> codeViewStates=new HashMap<>();private final Map<String,Boolean> reasoningExpanded=new LinkedHashMap<>();private final ChatGenerationService.Listener generationListener=this::renderGeneration;
- private ImageButton sendButton;private boolean sendButtonStopped,showingBackgroundRun; private ReplyContext activeReply; private FollowOutput follow; private ImageButton bottomButton; private final Map<String,Integer> viewportPositions=new HashMap<>(); private int restoreGeneration;
+ private ImageButton sendButton;private boolean sendButtonStopped; private ReplyContext activeReply; private FollowOutput follow; private ImageButton bottomButton; private final Map<String,Viewport> viewports=new LinkedHashMap<>(); private int restoreGeneration;
+ private final int[] touchPosition=new int[2];
+ private int swipePage=-1;
+ private float swipeOriginX,swipeOriginY;
  private void launchGeneration(ReplyContext request,String base,String key,JSONArray history,JSONObject session,Map<String,String> prepared,String query){
   ChatGenerationService.Run run=new ChatGenerationService.Run(request.sessionId,request.modelId,request.effort,request.timestamp);
-  run.base=base;run.key=key;run.history=history;run.session=session;run.prepared=new HashMap<>(prepared);run.query=query;
+  run.base=base;run.key=key;run.history=history;run.session=SessionRepository.get(prefs).snapshot(request.sessionId);run.prepared=new HashMap<>(prepared);run.query=query;
   run.protocol=request.protocol;run.search=request.search;run.branchId=request.branchId;
   run.temperature=request.temperature;run.topP=request.topP;run.outputTokens=request.outputTokens;run.configuredModel=ModelCapabilities.find(activeProvider(),request.modelId);
   try{
    if(Build.VERSION.SDK_INT>=33&&androidx.core.content.ContextCompat.checkSelfPermission(this,android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED&&!prefs.getBoolean("askedGenerationNotifications",false)){
     prefs.edit().putBoolean("askedGenerationNotifications",true).apply();requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS},87);
    }
-   generation=run;generationBody=null;ChatGenerationService.attach(generationListener);ChatGenerationService.launch(this,run);
+   generation=run;generationBody=null;ChatGenerationService.launch(this,run);
   }catch(RuntimeException failure){generation=null;finishRequest(request.visibleRow,"无法启动后台生成，请重试。",true);}
  }
  private void renderGeneration(ChatGenerationService.Run run){
   if(isDestroyed()||!run.sessionId.equals(prefs.getString("currentSessionId","")))return;
-  generation=run;
   if(run.finished){
-   cacheCodeViewStates();generation=null;generationBody=null;activeReply=null;sending=false;showingBackgroundRun=false;updateSendButton();refreshModelLabels();
-   JSONObject current=MessageEdits.findSession(readSessions(),run.sessionId);if(current!=null)restoreSession(current);refreshHistory();return;
+   if(generation!=null&&generation!=run)return;
+   finishGenerationView(run);
+   return;
   }
-  sending=true;updateSendButton();
-  if(activeReply==null||!activeReply.sessionId.equals(run.sessionId)||generationBody==null){
-   if(activeReply!=null&&activeReply.visibleRow!=null)messageList.removeView(activeReply.visibleRow);
-   // A queued message has just become the active turn; reload its persisted user row.
+  generation=run;
+  if(!sending){sending=true;updateSendButton();}
+  if(!visibleLatest||!run.sessionId.equals(visibleSession)||(pager!=null&&pager.getCurrentItem()==0))return;
+  if(generationBody==null||!run.id.equals(generationBody.messageId())){
    JSONObject session=MessageEdits.findSession(readSessions(),run.sessionId);
-   if(session!=null)renderSessionMessages(session,Math.max(0,session.optJSONArray("messages").length()-40));
-   activeReply=new ReplyContext(run.sessionId,run.modelId,run.effort,run.timestamp);activeReply.branchId=run.branchId;activeReply.search=run.search;
+   if(session==null)return;
+   JSONArray messages=session.optJSONArray("messages");
+   int size=messages==null?0:messages.length();
+   clearLiveRow();
+   if(visibleEnd!=size){
+    if(size==visibleEnd+1&&visibleEnd-visibleStart<50){
+     removeQueueRow();
+     JSONObject next=messages.optJSONObject(visibleEnd);
+     if(next!=null)renderSavedMessage(session,next);
+     visibleEnd=size;
+    }else{
+     int y=conversationScroll.getScrollY();
+     renderSessionMessages(session,Math.max(0,size-40));
+     if(!follow.following())restoreScroll(y);
+    }
+   }
+   updateQueueRow(session);
+   activeReply=new ReplyContext(run.sessionId,run.modelId,run.effort,run.timestamp);
+   activeReply.search=run.search;
    generationBody=markdownText("");
    generationBody.setMessageId(run.id);
    activeReply.visibleRow=assistantRow(generationBody,run.timestamp,run.modelId);
@@ -58,54 +87,155 @@ public class MainActivity extends AppCompatActivity {
    box.addView(progress,0,new LinearLayout.LayoutParams(-2,-2));
    messageList.addView(activeReply.visibleRow);
   }
-  String text=run.partial.toString(),thought=run.reasoningText.toString();
+  String answer=run.answer(),thought=run.thought();
   MessageStatusView progress=activeReply.visibleRow.findViewWithTag("generation-status");
-  progress.setVisibility(text.isEmpty()&&thought.isEmpty()?View.VISIBLE:View.GONE);
+  progress.setVisibility(answer.isEmpty()&&thought.isEmpty()?View.VISIBLE:View.GONE);
   if(progress.getVisibility()==View.VISIBLE)UiStyle.textIfChanged(progress,run.status);
-  generationBody.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);
-  if(!text.isEmpty())renderMarkdown(generationBody,text);
-  bindReasoning(activeReply.visibleRow,run.id,thought,text.isEmpty(),false,ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol));
+  generationBody.setVisibility(answer.isEmpty()?View.GONE:View.VISIBLE);
+  generationBody.setStreamingMarkdown(answer);
+  bindReasoning(activeReply.visibleRow,run.id,thought,answer.isEmpty(),false,
+   ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol),true);
   String searchStatus=run.searchStatus.isEmpty()?run.searchNote:run.searchStatus;
   if(!searchStatus.equals(activeReply.searchStatus)||activeReply.sources!=run.sources){
    activeReply.searchStatus=searchStatus;
    activeReply.sources=run.sources;
    refreshSearch(activeReply);
   }
+ }
+
+ private void clearLiveRow(){
+  if(activeReply!=null&&activeReply.visibleRow!=null)messageList.removeView(activeReply.visibleRow);
+  activeReply=null;
+  generationBody=null;
+ }
+
+ private void finishGenerationView(ChatGenerationService.Run run){
+  JSONObject session=MessageEdits.findSession(readSessions(),run.sessionId);
+  generation=null;
+  sending=false;
+  updateSendButton();
+  if(session!=null&&run.sessionId.equals(visibleSession)&&visibleLatest){
+   JSONArray messages=session.optJSONArray("messages");
+   int index=MessageEdits.indexOf(messages,run.id),size=messages==null?0:messages.length();
+   if(generationBody!=null&&run.id.equals(generationBody.messageId())&&index>=0&&index==visibleEnd){
+    LinearLayout row=activeReply.visibleRow,box=(LinearLayout)row.getChildAt(0);
+    codeViewStates.put(run.id,generationBody.codeState());
+    View progress=box.findViewWithTag("generation-status");
+    if(progress!=null)box.removeView(progress);
+    JSONObject saved=messages.optJSONObject(index);
+    generationBody.setMarkdown(saved.optBoolean("error")?"":saved.optString("text"));
+    bindSavedMessage(row,session,saved);
+    activeReply=null;
+    generationBody=null;
+    visibleEnd=size;
+   }else{
+    clearLiveRow();
+    if(visibleEnd!=size){
+     int y=conversationScroll.getScrollY();
+     renderSessionMessages(session,Math.max(0,size-40));
+     if(!follow.following())restoreScroll(y);
+    }
+   }
+   updateQueueRow(session);
+   refreshVisibleVersions(session);
+  }
+  refreshConversationTitle();
+  refreshHistory();
+  if(conversationFind!=null)conversationFind.refresh();
   scrollBottom();
  }
- @Override protected void onStop(){ChatGenerationService.detach(generationListener);super.onStop();}
- @Override protected void onSaveInstanceState(Bundle out){saveIncomingState(out);cacheCodeViewStates();Bundle states=new Bundle();for(Map.Entry<String,Bundle> item:codeViewStates.entrySet())states.putBundle(item.getKey(),item.getValue());out.putBundle("codeViewStates",states);Bundle reasoningState=new Bundle();for(Map.Entry<String,Boolean> item:reasoningExpanded.entrySet())reasoningState.putBoolean(item.getKey(),item.getValue());out.putBundle("reasoningExpanded",reasoningState);super.onSaveInstanceState(out);}
+
+ private void refreshVisibleVersions(JSONObject session){
+  String anchor=ConversationBranches.anchor(session);
+  View row=messageList.findViewWithTag("message:"+anchor);
+  if(row!=null){
+   JSONObject message=findMessage(session.optString("id"),anchor);
+   if(message!=null)bindVersions(row,session,message);
+  }
+ }
+ @Override protected void onStop(){persistComposerDraft();ChatGenerationService.detach(generationListener);super.onStop();}
+ @Override protected void onSaveInstanceState(Bundle out){saveIncomingState(out);cacheCodeViewStates();Bundle states=new Bundle();for(Map.Entry<String,Bundle> item:codeViewStates.entrySet())states.putBundle(item.getKey(),item.getValue());out.putBundle("codeViewStates",states);Bundle reasoningState=new Bundle();for(Map.Entry<String,Boolean> item:reasoningExpanded.entrySet())reasoningState.putBoolean(item.getKey(),item.getValue());out.putBundle("reasoningExpanded",reasoningState);saveViewport();Viewport viewport=viewports.get(visibleSession);if(viewport!=null)out.putBundle("viewport",viewport.bundle(visibleSession));super.onSaveInstanceState(out);}
  @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);if(IncomingShare.accepts(intent)){receiveSharedIntent(intent);return;}setIntent(intent);if(resumingGeneration(intent))openRunningConversation();}
  private boolean resumingGeneration(Intent intent){try{return intent!=null&&!IncomingShare.accepts(intent)&&intent.getBooleanExtra("resumeGeneration",false);}catch(RuntimeException malformed){return false;}}
  private void openRunningConversation(){
   ChatGenerationService.Run run=ChatGenerationService.active();if(run==null)return;
   JSONObject session=MessageEdits.findSession(readSessions(),run.sessionId);if(session==null)return;
-  sending=false;restoreSession(session);activeReply=null;generationBody=null;renderGeneration(run);closeHistory();
+  restoreSession(session);closeHistory();
  }
  private void cacheCodeViewStates(){if(messageList==null)return;for(int i=0;i<messageList.getChildCount();i++){MarkdownMessageView view=messageList.getChildAt(i).findViewWithTag("markdown-message");if(view!=null&&!view.messageId().isEmpty())codeViewStates.put(view.messageId(),view.codeState());}}
  private String protocol(){return activeProvider().optString("protocol",ChatApiClient.CHAT_COMPLETIONS);}
  private static final class ReplyContext {final ChatApiClient.CancellationHandle cancel=new ChatApiClient.CancellationHandle();final ChatApiClient client=new ChatApiClient(cancel);final StringBuffer partial=new StringBuffer();StreamingMarkdown stream;String searchStatus="",searchResults="";SearchSources sources=new SearchSources();LinearLayout visibleRow;final String sessionId,modelId,effort;final long timestamp;SearchOptions search=SearchOptions.OFF;String protocol="chat_completions",branchId="",temperature="0.7",topP="0.9",outputTokens=ContextBudget.DEFAULT_OUTPUT_TEXT;volatile boolean finished;ReplyContext(String sessionId,String modelId,String effort){this(sessionId,modelId,effort,System.currentTimeMillis());}ReplyContext(String sessionId,String modelId,String effort,long timestamp){this.sessionId=sessionId;this.modelId=modelId;this.effort=effort;this.timestamp=timestamp;}}
- @Override protected void onCreate(@Nullable Bundle state){ThemePalette.applyActivityTheme(this);super.onCreate(state);if(state!=null){Bundle savedReasoning=state.getBundle("reasoningExpanded");if(savedReasoning!=null)for(String key:savedReasoning.keySet())reasoningExpanded.put(key,savedReasoning.getBoolean(key));Bundle saved=state.getBundle("codeViewStates");if(saved!=null)for(String key:saved.keySet())codeViewStates.put(key,saved.getBundle(key));}prefs=getSharedPreferences("chat",MODE_PRIVATE);ModelStore.migrate(prefs);applyCustomTheme();getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);getWindow().setStatusBarColor(page);getWindow().setNavigationBarColor(page);getWindow().getDecorView().setSystemUiVisibility(ThemePalette.resolve(this).dark?0:View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);provider=prefs.getString("provider",provider);model=prefs.getString("model",model);reasoning=prefs.getString("reasoningEffort","default");setContentView(buildScreen());prefs.registerOnSharedPreferenceChangeListener(modelPreferences);refreshModelLabels();ChatGenerationService.recoverInterrupted(this);initializeSessions(SessionLaunchPolicy.claimColdStart()&&!resumingGeneration(getIntent()));refreshConversationTitle();restoreIncomingState(state);SessionRepository.get(prefs).manageSnapshots(this,pendingAttachments);if(!sharedIntentConsumed&&IncomingShare.accepts(getIntent()))receiveSharedIntent(getIntent());resumeAttachmentWork();}
+ @Override protected void onCreate(@Nullable Bundle state){ThemePalette.applyActivityTheme(this);super.onCreate(state);if(state!=null){Bundle viewport=state.getBundle("viewport");if(viewport!=null)viewports.put(viewport.getString("session",""),Viewport.from(viewport));Bundle savedReasoning=state.getBundle("reasoningExpanded");if(savedReasoning!=null)for(String key:savedReasoning.keySet())reasoningExpanded.put(key,savedReasoning.getBoolean(key));Bundle saved=state.getBundle("codeViewStates");if(saved!=null)for(String key:saved.keySet())codeViewStates.put(key,saved.getBundle(key));}prefs=getSharedPreferences("chat",MODE_PRIVATE);ModelStore.migrate(prefs);applyCustomTheme();getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);getWindow().setStatusBarColor(page);getWindow().setNavigationBarColor(page);getWindow().getDecorView().setSystemUiVisibility(ThemePalette.resolve(this).dark?0:View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);provider=prefs.getString("provider",provider);model=prefs.getString("model",model);reasoning=prefs.getString("reasoningEffort","default");setContentView(buildScreen());prefs.registerOnSharedPreferenceChangeListener(modelPreferences);refreshModelLabels();ChatGenerationService.recoverInterrupted(this);initializeSessions(SessionLaunchPolicy.claimColdStart()&&state==null&&!resumingGeneration(getIntent()));refreshConversationTitle();restoreIncomingState(state);draftsReady=true;SessionRepository.get(prefs).manageSnapshots(this,pendingAttachments);if(!sharedIntentConsumed&&IncomingShare.accepts(getIntent()))receiveSharedIntent(getIntent());resumeAttachmentWork();}
  private androidx.viewpager2.widget.ViewPager2 pager;
- private View buildScreen(){LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(page);root.addView(buildTopBar(),new LinearLayout.LayoutParams(-1,dp(ScreenInsets.TOP_BAR_DP)));root.addView(buildConversation(),new LinearLayout.LayoutParams(-1,0,1));root.addView(buildComposer(),new LinearLayout.LayoutParams(-1,-2));LinearLayout history=buildHistoryPanel();ScreenInsets.apply(this,root);ScreenInsets.apply(this,history);pager=new androidx.viewpager2.widget.ViewPager2(this);pager.setId(View.generateViewId());pager.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);pager.setOffscreenPageLimit(1);View[] pages={history,root};pager.setAdapter(new androidx.recyclerview.widget.RecyclerView.Adapter<PageHolder>(){public int getItemCount(){return 2;}public PageHolder onCreateViewHolder(ViewGroup parent,int type){FrameLayout host=new FrameLayout(MainActivity.this);host.setLayoutParams(new ViewGroup.LayoutParams(-1,-1));return new PageHolder(host);}public void onBindViewHolder(PageHolder h,int position){FrameLayout host=(FrameLayout)h.itemView;host.removeAllViews();View v=pages[position];if(v.getParent()!=null)((ViewGroup)v.getParent()).removeView(v);host.addView(v,new FrameLayout.LayoutParams(-1,-1));}});pager.setCurrentItem(1,false);pager.registerOnPageChangeCallback(new androidx.viewpager2.widget.ViewPager2.OnPageChangeCallback(){public void onPageSelected(int position){if(position==0){if(follow!=null)follow.detach();hideKeyboard();refreshHistory();}}});getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){public void handleOnBackPressed(){if(choicesOpen){setAttachmentChoices(false);return;}if(pager.getCurrentItem()==0)pager.setCurrentItem(1,true);else{setEnabled(false);getOnBackPressedDispatcher().onBackPressed();setEnabled(true);}}});return pager;}
+ private View buildScreen(){LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(page);root.addView(buildTopBar(),new LinearLayout.LayoutParams(-1,dp(ScreenInsets.TOP_BAR_DP)));
+  conversationFind=new ConversationFindBar(this,prefs,()->SessionRepository.get(prefs).snapshot(visibleSession),
+   hit->jumpToMessage(visibleSession,hit.id,hit.reasoning),this::clearMessageHighlight,showing->{
+    if(composerArea!=null)composerArea.setVisibility(showing?View.GONE:View.VISIBLE);
+    if(showing&&follow!=null)follow.detach();
+   });
+  root.addView(conversationFind,new LinearLayout.LayoutParams(-1,-2));
+  root.addView(buildConversation(),new LinearLayout.LayoutParams(-1,0,1));composerArea=buildComposer();root.addView(composerArea,new LinearLayout.LayoutParams(-1,-2));LinearLayout history=buildHistoryPanel();ScreenInsets.apply(this,root);ScreenInsets.apply(this,history);pager=new androidx.viewpager2.widget.ViewPager2(this);pager.setId(View.generateViewId());pager.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);pager.setOffscreenPageLimit(1);View[] pages={history,root};pager.setAdapter(new androidx.recyclerview.widget.RecyclerView.Adapter<PageHolder>(){public int getItemCount(){return 2;}public PageHolder onCreateViewHolder(ViewGroup parent,int type){FrameLayout host=new FrameLayout(MainActivity.this);host.setLayoutParams(new ViewGroup.LayoutParams(-1,-1));return new PageHolder(host);}public void onBindViewHolder(PageHolder h,int position){FrameLayout host=(FrameLayout)h.itemView;host.removeAllViews();View v=pages[position];if(v.getParent()!=null)((ViewGroup)v.getParent()).removeView(v);host.addView(v,new FrameLayout.LayoutParams(-1,-1));}});pager.setCurrentItem(1,false);pager.registerOnPageChangeCallback(new androidx.viewpager2.widget.ViewPager2.OnPageChangeCallback(){public void onPageSelected(int position){if(position==0){if(conversationFind.showing())conversationFind.hide();hideKeyboard();persistComposerDraft();refreshHistory();}else if(generation!=null&&!generation.finished)renderGeneration(generation);}});getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){public void handleOnBackPressed(){if(choicesOpen){setAttachmentChoices(false);return;}if(conversationFind.showing()){conversationFind.hide();return;}if(pager.getCurrentItem()==0)pager.setCurrentItem(1,true);else{setEnabled(false);getOnBackPressedDispatcher().onBackPressed();setEnabled(true);}}});return pager;}
  private static final class PageHolder extends androidx.recyclerview.widget.RecyclerView.ViewHolder {PageHolder(View v){super(v);}}
- private void openHistory(){refreshHistory();hideKeyboard();pager.setCurrentItem(0,true);}
+ private void openHistory(){persistComposerDraft();refreshHistory();hideKeyboard();pager.setCurrentItem(0,true);}
  private void closeHistory(){pager.setCurrentItem(1,true);}
- @Override public boolean dispatchTouchEvent(MotionEvent e){
-  // Choices are visually below the composer, but the whole screen remains normal input.
-  // Close on an outside DOWN without consuming it, so EditText, scrolling, back, and the
-  // two choice buttons retain their existing dispatch/focus behaviour.
-  if(choicesOpen&&e.getActionMasked()==MotionEvent.ACTION_DOWN){
-   View hit=touchTarget(getWindow().getDecorView(),e.getRawX(),e.getRawY());
+ @Override public boolean dispatchTouchEvent(MotionEvent event){
+  int action=event.getActionMasked();
+  boolean inConversation=false;
+  if(action==MotionEvent.ACTION_DOWN){
+   View hit=touchTarget(getWindow().getDecorView(),event.getRawX(),event.getRawY());
    boolean insideChoices=false,insideAttach=false;
-   for(View v=hit;v!=null;v=v.getParent() instanceof View?(View)v.getParent():null){
-    if(v==attachmentChoices)insideChoices=true;
-    if("添加附件".equals(v.getContentDescription()))insideAttach=true;
+   boolean protectedTouch=hit instanceof EditText||hit instanceof SeekBar||hit instanceof TextView&&((TextView)hit).hasSelection();
+   for(View view=hit;view!=null;view=view.getParent() instanceof View?(View)view.getParent():null){
+    if(view==conversationScroll)inConversation=true;
+    if(view==attachmentChoices)insideChoices=true;
+    if("添加附件".equals(view.getContentDescription()))insideAttach=true;
+    if(view instanceof HorizontalScrollView||view instanceof CodeBlockView)protectedTouch=true;
    }
-   if(!insideChoices&&!insideAttach)setAttachmentChoices(false);
+   if(choicesOpen&&!insideChoices&&!insideAttach)setAttachmentChoices(false);
+   if(pager!=null){
+    boolean eligible=!protectedTouch&&event.getX()>dp(24)&&event.getX()<pager.getWidth()-dp(24);
+    pager.setUserInputEnabled(eligible);
+    swipePage=eligible?pager.getCurrentItem():-1;
+    swipeOriginX=event.getRawX();
+    swipeOriginY=event.getRawY();
+   }
+  }else if(action==MotionEvent.ACTION_POINTER_DOWN)swipePage=-1;
+  else if(action==MotionEvent.ACTION_MOVE&&swipePage>=0){
+   float horizontal=Math.abs(event.getRawX()-swipeOriginX),vertical=Math.abs(event.getRawY()-swipeOriginY);
+   int slop=ViewConfiguration.get(this).getScaledTouchSlop();
+   if(vertical>slop&&vertical>horizontal)swipePage=-1;
+   else if(horizontal>slop&&horizontal>vertical*1.4f&&pager.getChildAt(0) instanceof ViewGroup){
+    ((ViewGroup)pager.getChildAt(0)).requestDisallowInterceptTouchEvent(false);
+   }
   }
-  if(pager!=null){if(e.getActionMasked()==MotionEvent.ACTION_DOWN){View hit=touchTarget(getWindow().getDecorView(),e.getRawX(),e.getRawY());for(View v=hit;v!=null&&v.getParent() instanceof View;v=(View)v.getParent())if(v==conversationScroll){follow.detach();break;}boolean protectedTouch=hit instanceof EditText||hit instanceof SeekBar||(hit instanceof TextView&&((TextView)hit).hasSelection());for(View v=hit;v!=null&&v.getParent() instanceof View;v=(View)v.getParent())if(v instanceof HorizontalScrollView||v instanceof CodeBlockView)protectedTouch=true;pager.setUserInputEnabled(!protectedTouch&&e.getX()>dp(24)&&e.getX()<pager.getWidth()-dp(24));}else if(e.getActionMasked()==MotionEvent.ACTION_UP||e.getActionMasked()==MotionEvent.ACTION_CANCEL)pager.post(()->pager.setUserInputEnabled(true));}return super.dispatchTouchEvent(e);}
- private View touchTarget(View v,float x,float y){int[] pos=new int[2];v.getLocationOnScreen(pos);if(v.getVisibility()!=View.VISIBLE||x<pos[0]||y<pos[1]||x>=pos[0]+v.getWidth()||y>=pos[1]+v.getHeight())return null;if(v instanceof ViewGroup){ViewGroup g=(ViewGroup)v;for(int i=g.getChildCount()-1;i>=0;i--){View hit=touchTarget(g.getChildAt(i),x,y);if(hit!=null)return hit;}}return v;}
+  if(follow!=null)follow.observeTouch(event,inConversation);
+  boolean handled=super.dispatchTouchEvent(event);
+  if(pager!=null&&(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)){
+   if(action==MotionEvent.ACTION_UP&&swipePage>=0&&pager.getCurrentItem()==swipePage){
+    float dx=event.getRawX()-swipeOriginX,dy=event.getRawY()-swipeOriginY;
+    if(Math.abs(dx)>pager.getWidth()*.2f&&Math.abs(dx)>Math.abs(dy)*1.4f){
+     int target=dx>0?0:1;
+     if(target!=swipePage)pager.setCurrentItem(target,true);
+    }
+   }
+   swipePage=-1;
+   pager.post(()->pager.setUserInputEnabled(true));
+  }
+  return handled;
+ }
+ private View touchTarget(View view,float x,float y){
+  view.getLocationOnScreen(touchPosition);
+  int left=touchPosition[0],top=touchPosition[1];
+  if(view.getVisibility()!=View.VISIBLE||x<left||y<top||x>=left+view.getWidth()||y>=top+view.getHeight())return null;
+  if(view instanceof ViewGroup){
+   ViewGroup group=(ViewGroup)view;
+   for(int i=group.getChildCount()-1;i>=0;i--){
+    View hit=touchTarget(group.getChildAt(i),x,y);
+    if(hit!=null)return hit;
+   }
+  }
+  return view;
+ }
  private View buildTopBar(){
   LinearLayout bar=new LinearLayout(this);bar.setGravity(Gravity.CENTER_VERTICAL);bar.setPadding(dp(16),dp(8),dp(16),dp(8));
   ImageButton menu=vectorButton(R.drawable.ic_menu,"打开历史记录",ink);menu.setOnClickListener(v->openHistory());
@@ -113,24 +243,66 @@ public class MainActivity extends AppCompatActivity {
   conversationTitle=label("新对话",20,ink,true);conversationTitle.setContentDescription("当前对话名称");
   conversationTitle.setPadding(dp(12),0,dp(12),0);conversationTitle.setSingleLine(true);conversationTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
   bar.addView(conversationTitle,new LinearLayout.LayoutParams(0,-1,1));conversationTitle.setGravity(Gravity.CENTER_VERTICAL);
+  TextView actions=iconButton("⋮");actions.setContentDescription("对话操作");
+  actions.setOnClickListener(v->showCurrentConversationActions());
+  bar.addView(actions,new LinearLayout.LayoutParams(dp(44),dp(48)));
   ImageButton add=vectorButton(R.drawable.ic_plus,"新建对话",purple);UiStyle.clickable(add,card,16);add.setOnClickListener(v->resetConversation());bar.addView(add,new LinearLayout.LayoutParams(dp(48),dp(48)));return bar;
  }
- private View buildConversation(){conversationScroll=new ScrollView(this);conversationScroll.setFillViewport(true);conversationScroll.setClipToPadding(false);conversationScroll.setVerticalScrollBarEnabled(false);messageList=new LinearLayout(this);messageList.setOrientation(LinearLayout.VERTICAL);messageList.setPadding(dp(24),dp(16),dp(24),dp(24));LinearLayout w=new LinearLayout(this);w.setOrientation(LinearLayout.VERTICAL);w.setGravity(Gravity.CENTER_HORIZONTAL);w.setPadding(0,dp(52),0,dp(32));if(HomeCopy.isIconMode(prefs)){ImageView welcome=WelcomeImage.create(this,prefs.getString("welcomeImageUri",""),prefs.getString("welcomeImageShape","circle"));if(welcome!=null)w.addView(welcome,new LinearLayout.LayoutParams(dp(76),dp(76)));else w.addView(label(HomeCopy.get(prefs,"welcomeSymbol"),38,purple,true));}else{TextView welcomeTitle=label(HomeCopy.get(prefs,"welcomeTitle"),26,ink,true);welcomeTitle.setGravity(Gravity.CENTER);w.addView(welcomeTitle);TextView welcomeBody=label(HomeCopy.get(prefs,"welcomeBody"),15,muted,false);welcomeBody.setGravity(Gravity.CENTER);welcomeBody.setLineSpacing(dp(4),1.15f);welcomeBody.setPadding(dp(16),dp(16),dp(16),0);w.addView(welcomeBody);}messageList.addView(w,new LinearLayout.LayoutParams(-1,-2));messageList.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->w.setVisibility(messageList.getChildCount()>1?View.GONE:View.VISIBLE));conversationScroll.addView(messageList);conversationScroll.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);FrameLayout host=new FrameLayout(this);host.addView(conversationScroll,new FrameLayout.LayoutParams(-1,-1));bottomButton=vectorButton(R.drawable.ic_arrow_down,"回到底部",muted);bottomButton.setBackground(roundDrawable(card,20));bottomButton.setVisibility(View.INVISIBLE);FrameLayout.LayoutParams buttonParams=new FrameLayout.LayoutParams(dp(40),dp(40),Gravity.BOTTOM|Gravity.RIGHT);buttonParams.setMargins(dp(12),dp(12),dp(12),dp(12));host.addView(bottomButton,buttonParams);follow=new FollowOutput(conversationScroll,detached->updateBottomButton());conversationScroll.setOnScrollChangeListener((v,x,y,oldX,oldY)->updateBottomButton());conversationScroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->updateBottomButton());messageList.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->updateBottomButton());bottomButton.setOnClickListener(v->follow.resume());return host;}
- private void updateBottomButton(){if(follow==null||bottomButton==null)return;float density=getResources().getDisplayMetrics().density;int distance=Math.max(0,follow.bottom()-conversationScroll.getScrollY());boolean visible=bottomButton.getVisibility()==View.VISIBLE;boolean show=!follow.following()&&(visible?distance>32*density:distance>Math.max(160*density,conversationScroll.getHeight()*.25f));int visibility=show?View.VISIBLE:View.INVISIBLE;if(bottomButton.getVisibility()!=visibility)bottomButton.setVisibility(visibility);}
+ private void showCurrentConversationActions(){
+  JSONObject session=MessageEdits.findSession(readSessions(),visibleSession);
+  if(session==null)return;
+  String id=session.optString("id");
+  hideKeyboard();
+  ChoiceDialogs.single(this,"对话操作",new String[]{"查找消息","导出为 Markdown","对话设置"},-1,which->{
+   if(!id.equals(visibleSession))return;
+   if(which==0){setAttachmentChoices(false);conversationFind.show();}
+   else if(which==1)startMarkdownExport(id,"");
+   else showConversationSettings();
+  });
+ }
+ private View buildConversation(){conversationScroll=new ScrollView(this);conversationScroll.setFillViewport(true);conversationScroll.setClipToPadding(false);conversationScroll.setVerticalScrollBarEnabled(false);messageList=new LinearLayout(this);messageList.setOrientation(LinearLayout.VERTICAL);messageList.setPadding(dp(24),dp(16),dp(24),dp(24));LinearLayout w=new LinearLayout(this);w.setOrientation(LinearLayout.VERTICAL);w.setGravity(Gravity.CENTER_HORIZONTAL);w.setPadding(0,dp(52),0,dp(32));if(HomeCopy.isIconMode(prefs)){ImageView welcome=WelcomeImage.create(this,prefs.getString("welcomeImageUri",""),prefs.getString("welcomeImageShape","circle"));if(welcome!=null)w.addView(welcome,new LinearLayout.LayoutParams(dp(76),dp(76)));else w.addView(label(HomeCopy.get(prefs,"welcomeSymbol"),38,purple,true));}else{TextView welcomeTitle=label(HomeCopy.get(prefs,"welcomeTitle"),26,ink,true);welcomeTitle.setGravity(Gravity.CENTER);w.addView(welcomeTitle);TextView welcomeBody=label(HomeCopy.get(prefs,"welcomeBody"),15,muted,false);welcomeBody.setGravity(Gravity.CENTER);welcomeBody.setLineSpacing(dp(4),1.15f);welcomeBody.setPadding(dp(16),dp(16),dp(16),0);w.addView(welcomeBody);}messageList.addView(w,new LinearLayout.LayoutParams(-1,-2));messageList.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->w.setVisibility(messageList.getChildCount()>1?View.GONE:View.VISIBLE));conversationScroll.addView(messageList);conversationScroll.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);FrameLayout host=new FrameLayout(this);host.addView(conversationScroll,new FrameLayout.LayoutParams(-1,-1));bottomButton=vectorButton(R.drawable.ic_arrow_down,"回到底部",muted);bottomButton.setBackground(roundDrawable(card,20));bottomButton.setVisibility(View.INVISIBLE);FrameLayout.LayoutParams buttonParams=new FrameLayout.LayoutParams(dp(40),dp(40),Gravity.BOTTOM|Gravity.RIGHT);buttonParams.setMargins(dp(12),dp(12),dp(12),dp(12));host.addView(bottomButton,buttonParams);follow=new FollowOutput(conversationScroll,detached->updateBottomButton());conversationScroll.setOnScrollChangeListener((v,x,y,oldX,oldY)->updateBottomButton());conversationScroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->updateBottomButton());messageList.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->updateBottomButton());bottomButton.setOnClickListener(v->jumpToBottom());return host;}
+ private void updateBottomButton(){
+  if(follow==null||bottomButton==null)return;
+  int distance=Math.max(0,follow.bottom()-conversationScroll.getScrollY());
+  boolean visible=bottomButton.getVisibility()==View.VISIBLE;
+  float threshold=sending?dp(88):Math.max(dp(160),conversationScroll.getHeight()*.25f);
+  boolean show=!follow.following()&&(!visibleLatest||(visible?distance>dp(32):distance>threshold));
+  int visibility=show?View.VISIBLE:View.INVISIBLE;
+  if(bottomButton.getVisibility()!=visibility)bottomButton.setVisibility(visibility);
+ }
+ private void jumpToBottom(){
+  if(conversationFind!=null&&conversationFind.showing())conversationFind.hide();
+  if(!visibleLatest){
+   JSONObject session=MessageEdits.findSession(readSessions(),visibleSession);
+   if(session!=null){
+    JSONArray messages=session.optJSONArray("messages");
+    renderSessionMessages(session,Math.max(0,(messages==null?0:messages.length())-40));
+    if(generation!=null&&!generation.finished)renderGeneration(generation);
+   }
+  }
+  ++restoreGeneration;
+  follow.resume();
+ }
  private ImageButton vectorButton(int resource,String description,int tint){ImageButton button=new ImageButton(this);button.setImageResource(resource);button.setScaleType(ImageView.ScaleType.CENTER);button.setPadding(0,0,0,0);button.setImageTintList(android.content.res.ColorStateList.valueOf(tint==muted?ThemePalette.readable(tint,card,page):tint));android.util.TypedValue background=new android.util.TypedValue();getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless,background,true);button.setBackgroundResource(background.resourceId);button.setContentDescription(description);return button;}
  private View buildComposer(){
   LinearLayout area=new LinearLayout(this);area.setOrientation(LinearLayout.VERTICAL);area.setPadding(dp(16),dp(6),dp(16),dp(12));
   LinearLayout opts=new LinearLayout(this);opts.setGravity(Gravity.CENTER_VERTICAL);
   opts.addView(label(HomeCopy.get(prefs,"searchLabel"),12,muted,false));
   webSwitch=new SwitchCompat(this);webSwitch.setContentDescription("联网搜索");webSwitch.setChecked(scoped().getBoolean("webSearchEnabled",false));
-  webSwitch.setOnCheckedChangeListener((button,checked)->scoped().edit().putBoolean("webSearchEnabled",checked).apply());
+  webSwitch.setOnCheckedChangeListener((button,checked)->{SharedPreferences config=scoped();if(config.getBoolean("webSearchEnabled",false)!=checked)config.edit().putBoolean("webSearchEnabled",checked).apply();});
   opts.addView(webSwitch,new LinearLayout.LayoutParams(dp(52),dp(48)));
   modelSelector=label("",12,purple,true);modelSelector.setSingleLine(true);modelSelector.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);modelSelector.setGravity(Gravity.RIGHT|Gravity.CENTER_VERTICAL);modelSelector.setPadding(dp(12),0,dp(4),0);modelSelector.setContentDescription("选择模型");modelSelector.setOnClickListener(v->showModelSelector());
   opts.addView(modelSelector,new LinearLayout.LayoutParams(0,dp(48),1));area.addView(opts,new LinearLayout.LayoutParams(-1,-2));
   attachmentPreview=new LinearLayout(this);attachmentPreview.setOrientation(LinearLayout.VERTICAL);area.addView(attachmentPreview,new LinearLayout.LayoutParams(-1,-2));
   LinearLayout panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setPadding(dp(8),dp(6),dp(8),dp(8));
   panel.setBackground(UiStyle.surface(this,card,24,true));panel.setElevation(0);panel.setTranslationZ(0);
-  composer=new EditText(this);composer.setHint(HomeCopy.get(prefs,"composerHint"));composer.setHintTextColor(muted);composer.setTextColor(ink);composer.setTextSize(16);
+  composer=new androidx.appcompat.widget.AppCompatEditText(this){
+   @Override protected void onSelectionChanged(int start,int end){
+    super.onSelectionChanged(start,end);
+    scheduleComposerDraft();
+   }
+  };
+  composer.setHint(HomeCopy.get(prefs,"composerHint"));composer.setHintTextColor(muted);composer.setTextColor(ink);composer.setTextSize(16);
   composer.setSingleLine(false);composer.setMinLines(1);composer.setMaxLines(5);composer.setGravity(Gravity.TOP);
   composer.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
   composer.setBackgroundColor(Color.TRANSPARENT);composer.setPadding(dp(12),dp(10),dp(12),dp(8));composer.setContentDescription("消息输入框");
@@ -138,18 +310,36 @@ public class MainActivity extends AppCompatActivity {
   LinearLayout tools=new LinearLayout(this);tools.setGravity(Gravity.CENTER_VERTICAL);
   ImageButton at=vectorButton(R.drawable.ic_attach,"添加附件",muted);at.setOnClickListener(v->toggleAttachmentChoices());tools.addView(at,new LinearLayout.LayoutParams(dp(48),dp(48)));
   ImageButton expand=vectorButton(R.drawable.ic_expand,"展开输入框",muted);expand.setOnClickListener(v->showExpandedComposer());tools.addView(expand,new LinearLayout.LayoutParams(dp(48),dp(48)));
+  ImageButton prompts=vectorButton(R.drawable.ic_prompt,"插入提示词",muted);
+  prompts.setOnClickListener(v->showPromptLibrary());
+  tools.addView(prompts,new LinearLayout.LayoutParams(dp(48),dp(48)));
   modelLabel=label(ReasoningSheet.label(reasoning)+"  ›",12,muted,false);modelLabel.setSingleLine(true);modelLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);modelLabel.setGravity(Gravity.CENTER_VERTICAL);modelLabel.setContentDescription("选择思考强度");modelLabel.setOnClickListener(v->showReasoningSelector());
   tools.addView(modelLabel,new LinearLayout.LayoutParams(0,dp(48),1));
   sendButton=vectorButton(R.drawable.ic_send,"发送消息",ThemePalette.resolve(this).onPrimary);UiStyle.clickable(sendButton,purple,18);
-  sendButton.setOnClickListener(v->{if(sending&&composer.getText().toString().trim().isEmpty()&&pendingAttachments.isEmpty())stopReply();else sendMessage();});sendButton.setOnLongClickListener(v->{showConversationSettings();return true;});composer.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence x,int a,int c,int d){}public void onTextChanged(CharSequence x,int a,int b,int c){updateSendButton();}public void afterTextChanged(android.text.Editable e){}});tools.addView(sendButton,new LinearLayout.LayoutParams(dp(48),dp(48)));
+  sendButton.setOnClickListener(v->{if(sending&&composer.getText().toString().trim().isEmpty()&&pendingAttachments.isEmpty())stopReply();else sendMessage();});sendButton.setOnLongClickListener(v->{showConversationSettings();return true;});composer.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence x,int a,int c,int d){}public void onTextChanged(CharSequence x,int a,int b,int c){updateSendButton();scheduleComposerDraft();}public void afterTextChanged(android.text.Editable e){}});tools.addView(sendButton,new LinearLayout.LayoutParams(dp(48),dp(48)));
   panel.addView(tools,new LinearLayout.LayoutParams(-1,-2));area.addView(panel,new LinearLayout.LayoutParams(-1,-2));
   attachmentChoices=new LinearLayout(this);attachmentChoices.setTag("attachment-choices");attachmentChoices.setPadding(0,dp(8),0,dp(4));attachmentChoices.setVisibility(View.GONE);
   for(String choice:new String[]{"图片","文件"}){TextView option=label(choice,15,ink,true);option.setGravity(Gravity.CENTER);option.setContentDescription("选择"+choice);UiStyle.clickable(option,card,16);option.setOnClickListener(v->{setAttachmentChoices(false);if("文件".equals(choice))openFileManagers();else openImagePicker();});LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(0,dp(48),1);cp.setMargins(dp(4),0,dp(4),0);attachmentChoices.addView(option,cp);}
   area.addView(attachmentChoices,new LinearLayout.LayoutParams(-1,0));return area;
  }
  private boolean isActive(ReplyContext reply){return reply==activeReply&&!reply.finished&&!reply.cancel.isCancelled()&&!isDestroyed();}
- private void updateSendButton(){if(sendButton==null)return;boolean stop=sending&&composer!=null&&composer.getText().toString().trim().isEmpty()&&pendingAttachments.isEmpty();sendButtonStopped=stop;sendButton.setImageResource(stop?R.drawable.ic_stop:R.drawable.ic_send);sendButton.setContentDescription(stop?"停止回复并清空本对话队列":sending?"加入发送队列":"发送消息");}
- private void stopReply(){if(generation!=null&&!generation.finished){ChatGenerationService.stop(this,generation);return;}if(follow!=null)follow.detach();ReplyContext reply=activeReply;if(reply==null)return;if(reply.search.builtin){reply.searchStatus="内置搜索 / 回复已停止";refreshSearch(reply);}String partial=reply.stream==null?reply.partial.toString():reply.stream.seal();if(!partial.isEmpty()){completeReply(reply,partial,false);return;}reply.cancel.cancel();if(reply.stream!=null)reply.stream.finish("");reply.finished=true;activeReply=null;sending=false;updateSendButton();if(reply.visibleRow!=null)messageList.removeView(reply.visibleRow);}
+ private void updateSendButton(){if(sendButton==null)return;boolean stop=sending&&composer!=null&&composer.getText().toString().trim().isEmpty()&&pendingAttachments.isEmpty();if(sendButtonStopped!=stop){sendButtonStopped=stop;sendButton.setImageResource(stop?R.drawable.ic_stop:R.drawable.ic_send);}String description=stop?"停止回复并清空本对话队列":sending?"加入发送队列":"发送消息";if(!description.contentEquals(sendButton.getContentDescription()))sendButton.setContentDescription(description);}
+ private void stopReply(){if(generation!=null&&!generation.finished){try{ChatGenerationService.stop(this,generation);}catch(RuntimeException failure){Toast.makeText(this,"暂时无法停止，请重试。",Toast.LENGTH_SHORT).show();}return;}if(follow!=null)follow.detach();ReplyContext reply=activeReply;if(reply==null)return;if(reply.search.builtin){reply.searchStatus="内置搜索 / 回复已停止";refreshSearch(reply);}String partial=reply.stream==null?reply.partial.toString():reply.stream.seal();if(!partial.isEmpty()){completeReply(reply,partial,false);return;}reply.cancel.cancel();if(reply.stream!=null)reply.stream.finish("");reply.finished=true;activeReply=null;sending=false;updateSendButton();if(reply.visibleRow!=null)messageList.removeView(reply.visibleRow);}
+ private void showPromptLibrary(){
+  setAttachmentChoices(false);
+  hideKeyboard();
+  String owner=draftSessionId;
+  new PromptLibraryUi(this,prefs).choose(value->{
+   if(isDestroyed()||!owner.equals(draftSessionId))return;
+   android.text.Editable input=composer.getText();
+   int start=composer.getSelectionStart(),end=composer.getSelectionEnd();
+   if(start<0||end<0)start=end=input.length();
+   int insertAt=Math.min(start,end);
+   input.replace(insertAt,Math.max(start,end),value);
+   composer.setSelection(insertAt+value.length());
+   composer.requestFocus();
+  });
+ }
  private AlertDialog expandedComposerDialog;
  private void showExpandedComposer(){
   setAttachmentChoices(false);final String original=composer.getText().toString();
@@ -158,13 +348,30 @@ public class MainActivity extends AppCompatActivity {
   editor.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
   editor.setGravity(Gravity.TOP);editor.setTextSize(17);editor.setLineSpacing(dp(4),1.15f);
   editor.setPadding(dp(16),dp(16),dp(16),dp(16));editor.setBackground(UiStyle.surface(context,page,18,false));
-  editor.setText(original);editor.setSelection(editor.length());
-  PanelDialog dialog=new PanelDialog(this,"编辑草稿","整理思路，完成后应用到输入框",editor);
-  dialog.action(AlertDialog.BUTTON_NEGATIVE,"取消",()->composer.setText(original))
-   .action(AlertDialog.BUTTON_NEUTRAL,"收起",()->composer.setText(editor.getText()))
-   .action(AlertDialog.BUTTON_POSITIVE,"应用",()->composer.setText(editor.getText()));
-  expandedComposerDialog=dialog;dialog.setOnCancelListener(d->composer.setText(original));
-  dialog.setOnDismissListener(d->expandedComposerDialog=null);dialog.show();
+  editor.setText(original);
+  editor.setSelection(editor.length());
+  String owner=draftSessionId;
+  PanelDialog dialog=new PanelDialog(this,"编辑草稿","",editor);
+  Runnable apply=()->{
+   if(!owner.equals(draftSessionId))return;
+   composer.setText(editor.getText());
+   int caret=editor.getSelectionEnd();
+   composer.setSelection(caret<0?composer.length():Math.min(caret,composer.length()));
+  };
+  dialog.action(AlertDialog.BUTTON_NEGATIVE,"取消",null)
+   .action(AlertDialog.BUTTON_NEUTRAL,"收起",apply)
+   .action(AlertDialog.BUTTON_POSITIVE,"应用",apply);
+  expandedComposerDialog=dialog;
+  expandedDraftEditor=editor;
+  editor.addTextChangedListener(new android.text.TextWatcher(){
+   public void beforeTextChanged(CharSequence text,int start,int count,int after){}
+   public void onTextChanged(CharSequence text,int start,int before,int count){scheduleComposerDraft();}
+   public void afterTextChanged(android.text.Editable text){}
+  });
+  dialog.setOnDismissListener(d->{
+   if(expandedComposerDialog==dialog){expandedComposerDialog=null;expandedDraftEditor=null;scheduleComposerDraft();}
+  });
+  dialog.show();
  }
  private void refreshSearch(ReplyContext reply){if(reply.visibleRow!=null)addSearchCard(reply.visibleRow,reply.searchStatus,reply.sources,"");}
  private void addSearchCard(LinearLayout row,String status,SearchSources sources,String legacy){
@@ -244,21 +451,104 @@ public class MainActivity extends AppCompatActivity {
  private void toggleAttachmentChoices(){setAttachmentChoices(!choicesOpen);}
  private void setAttachmentChoices(boolean open){if(attachmentChoices==null||choicesOpen==open)return;choicesOpen=open;if(attachmentAnimation!=null)attachmentAnimation.cancel();attachmentChoices.setVisibility(View.VISIBLE);int start=attachmentChoices.getLayoutParams().height;attachmentAnimation=android.animation.ValueAnimator.ofInt(start,open?dp(60):0);attachmentAnimation.setDuration(160);attachmentAnimation.setInterpolator(new android.view.animation.DecelerateInterpolator());attachmentAnimation.addUpdateListener(a->{int height=(Integer)a.getAnimatedValue();ViewGroup.LayoutParams lp=attachmentChoices.getLayoutParams();lp.height=height;attachmentChoices.setLayoutParams(lp);attachmentChoices.setAlpha(height/(float)dp(60));});attachmentAnimation.addListener(new android.animation.AnimatorListenerAdapter(){public void onAnimationEnd(android.animation.Animator a){if(!choicesOpen)attachmentChoices.setVisibility(View.GONE);}});attachmentAnimation.start();}
  private void openImagePicker(){
-  Intent i;if(Build.VERSION.SDK_INT>=33){i=new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES).setType("image/*");i.putExtra(android.provider.MediaStore.EXTRA_PICK_IMAGES_MAX,Math.min(10,android.provider.MediaStore.getPickImagesMaxLimit()));}
-  else i=AttachmentSelection.documents(true);
-  try{startActivityForResult(i,PICK_ATTACHMENT);}catch(ActivityNotFoundException missing){openFileManagers();}
+  Intent intent;
+  if(Build.VERSION.SDK_INT>=33){
+   intent=new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES).setType("image/*");
+   intent.putExtra(android.provider.MediaStore.EXTRA_PICK_IMAGES_MAX,Math.min(10,android.provider.MediaStore.getPickImagesMaxLimit()));
+  }else intent=AttachmentSelection.documents(true);
+  attachmentPickerSession=draftSessionId;
+  try{startActivityForResult(intent,PICK_ATTACHMENT);}catch(ActivityNotFoundException missing){openFileManagers();}
  }
- private void openFileManagers(){try{startActivityForResult(AttachmentSelection.managers(),PICK_ATTACHMENT);}catch(ActivityNotFoundException missing){Toast.makeText(this,"没有可用的文件管理器，请安装支持文件选择的应用",Toast.LENGTH_LONG).show();}}
- @Override protected void onActivityResult(int r,int result,@Nullable Intent data){
-  super.onActivityResult(r,result,data);if(r==81||r==82){handleBackupResult(r,result,data);return;}if(r!=PICK_ATTACHMENT)return;setAttachmentChoices(false);if(result!=RESULT_OK)return;
-  List<Uri> selected=AttachmentBatch.collect(data);if(selected.size()>AttachmentBatch.MAX_COUNT){Toast.makeText(this,"最多添加 "+AttachmentBatch.MAX_COUNT+" 个附件",Toast.LENGTH_LONG).show();selected=new ArrayList<>(selected.subList(0,AttachmentBatch.MAX_COUNT));}
-  attachmentImports.addLast(new IncomingShare.Request(selected,data==null?0:data.getFlags(),"",false));startNextAttachmentImport();
+ private void openFileManagers(){
+  attachmentPickerSession=draftSessionId;
+  try{startActivityForResult(AttachmentSelection.managers(),PICK_ATTACHMENT);}
+  catch(ActivityNotFoundException missing){
+   attachmentPickerSession="";
+   Toast.makeText(this,"没有可用的文件管理器，请安装支持文件选择的应用",Toast.LENGTH_LONG).show();
+  }
+ }
+ @Override protected void onActivityResult(int request,int result,@Nullable Intent data){
+  super.onActivityResult(request,result,data);
+  if(request==EXPORT_MARKDOWN){finishMarkdownExport(result,data);return;}
+  if(request==81||request==82){handleBackupResult(request,result,data);return;}
+  if(request!=PICK_ATTACHMENT)return;
+  String owner=attachmentPickerSession.isEmpty()?draftSessionId:attachmentPickerSession;
+  attachmentPickerSession="";
+  setAttachmentChoices(false);
+  if(result!=RESULT_OK||data==null)return;
+  List<Uri> selected=AttachmentBatch.collect(data);
+  if(selected.size()>AttachmentBatch.MAX_COUNT){
+   Toast.makeText(this,"最多添加 "+AttachmentBatch.MAX_COUNT+" 个附件",Toast.LENGTH_LONG).show();
+   selected=new ArrayList<>(selected.subList(0,AttachmentBatch.MAX_COUNT));
+  }
+  if(selected.isEmpty())return;
+  if(!owner.equals(draftSessionId)){
+   storeAttachmentsForDraft(owner,selected,data.getFlags());
+   return;
+  }
+  attachmentImports.addLast(new IncomingShare.Request(selected,data.getFlags(),"",false));
+  startNextAttachmentImport();
+ }
+
+ private void storeAttachmentsForDraft(String owner,List<Uri> selected,int flags){
+  Context app=getApplicationContext();
+  attachmentWorker.execute(()->{
+   List<JSONObject> kept=new ArrayList<>();
+   List<String> errors=new ArrayList<>();
+   for(Uri uri:selected){
+    if(Thread.currentThread().isInterrupted())break;
+    try{kept.add(AttachmentSelection.retain(app,uri,flags));}
+    catch(Exception failure){errors.add(ApiFailure.local(failure));}
+   }
+   runOnUiThread(()->{
+    if(isDestroyed()){for(JSONObject item:kept)AttachmentSelection.discard(app,item);return;}
+    SessionRepository repository=SessionRepository.get(prefs);
+    if(repository.snapshot(owner)==null){
+     for(JSONObject item:kept)AttachmentSelection.discard(app,item);
+     Toast.makeText(this,"原对话已删除，附件未添加。",Toast.LENGTH_SHORT).show();
+     return;
+    }
+    if(owner.equals(draftSessionId)){
+     mergeDraftAttachments(kept,pendingAttachments,errors);
+     preparePendingAttachments();
+    }else{
+     ComposerDraft draft=ComposerDraft.read(repository.composerDraft(owner));
+     List<JSONObject> attachments=new ArrayList<>();
+     for(int i=0;i<draft.attachments.length();i++){
+      JSONObject item=draft.attachments.optJSONObject(i);
+      if(item!=null)attachments.add(item);
+     }
+     mergeDraftAttachments(kept,attachments,errors);
+     try{repository.saveComposerDraft(owner,ComposerDraft.capture(draft.text,draft.start,draft.end,attachments,draft.imports));}
+     catch(JSONException failure){
+      for(JSONObject item:kept)AttachmentSelection.discard(app,item);
+      errors.add("无法保存附件草稿。");
+     }
+     refreshHistory();
+     if(errors.isEmpty())Toast.makeText(this,"附件已添加到原对话草稿。",Toast.LENGTH_SHORT).show();
+    }
+    if(!errors.isEmpty())showAttachmentImportErrors(errors);
+   });
+  });
+ }
+
+ private void mergeDraftAttachments(List<JSONObject> imported,List<JSONObject> draft,List<String> errors){
+  Set<String> sources=new HashSet<>();
+  for(JSONObject item:draft)sources.add(item.optString("sourceUri",item.optString("uri")));
+  for(JSONObject item:imported){
+   String source=item.optString("sourceUri",item.optString("uri"));
+   if(!sources.contains(source)&&draft.size()<AttachmentBatch.MAX_COUNT){sources.add(source);draft.add(item);}
+   else{
+    if(!sources.contains(source))errors.add("最多添加 "+AttachmentBatch.MAX_COUNT+" 个附件");
+    AttachmentSelection.discard(getApplicationContext(),item);
+   }
+  }
  }
  private void receiveSharedIntent(Intent intent){
   sharedIntentConsumed=true;
   // Keep the launch filter stable across recreation; discard external extras and URI grants.
   Intent clean=getIntent().cloneFilter().setComponent(new ComponentName(this,MainActivity.class));clean.setSelector(null);clean.setFlags(0);setIntent(clean);
-  if(attachmentImports.size()>=10){Toast.makeText(this,"分享任务较多，请稍后重试",Toast.LENGTH_LONG).show();return;}
+  if(attachmentImports.size()+(activeAttachmentImport==null?0:1)>=10){Toast.makeText(this,"分享任务较多，请稍后重试",Toast.LENGTH_LONG).show();return;}
   try{IncomingShare.Request request=IncomingShare.read(this,intent);if(request!=null){attachmentImports.addLast(request);closeHistory();setAttachmentChoices(false);startNextAttachmentImport();}}
   catch(IOException error){Toast.makeText(this,error.getMessage(),Toast.LENGTH_LONG).show();}
  }
@@ -269,6 +559,7 @@ public class MainActivity extends AppCompatActivity {
    request.started=true;request.autoSend=false;
    if(!request.text.trim().isEmpty())composer.append((composer.length()==0?"":"\n")+request.text);
   }
+  scheduleComposerDraft();
   List<Uri> uris=new ArrayList<>();List<String> rejected=new ArrayList<>();
   for(Uri uri:request.uris){
    if(!"content".equals(uri.getScheme())){rejected.add("文件管理器未提供可读取的文件地址");continue;}
@@ -293,6 +584,7 @@ public class MainActivity extends AppCompatActivity {
  }
  private void finishAttachmentImport(IncomingShare.Request request){
   if(activeAttachmentImport!=request)return;activeAttachmentImport=null;
+  scheduleComposerDraft();
   if(request.shared&&!pendingAttachments.isEmpty())Toast.makeText(this,"分享文件已添加，请点击发送",Toast.LENGTH_LONG).show();
   startNextAttachmentImport();
  }
@@ -302,6 +594,7 @@ public class MainActivity extends AppCompatActivity {
  }
  private void preparePendingAttachments(Runnable ready){
   final int generation=++attachmentGeneration;if(attachmentTask!=null)attachmentTask.cancel(true);attachmentLoading=!pendingAttachments.isEmpty();preparedAttachments.clear();renderAttachmentPreview();
+  scheduleComposerDraft();
   final List<JSONObject> captured=new ArrayList<>();try{for(JSONObject d:pendingAttachments)captured.add(new JSONObject(d.toString()));}catch(JSONException error){attachmentLoading=false;return;}
   attachmentTask=attachmentWorker.submit(()->{
    Map<String,String> payloads=new HashMap<>();Map<String,JSONObject> snapshots=new HashMap<>();List<JSONObject> createdSnapshots=new ArrayList<>();boolean notice=false;
@@ -319,6 +612,7 @@ public class MainActivity extends AppCompatActivity {
     if(isDestroyed()||generation!=attachmentGeneration){discardPreparedSnapshots(createdSnapshots);return;}
     for(int i=0;i<pendingAttachments.size();i++){JSONObject updated=snapshots.get(pendingAttachments.get(i).optString("uri"));if(updated!=null)pendingAttachments.set(i,updated);}
     preparedAttachments.putAll(payloads);attachmentLoading=false;renderAttachmentPreview();updateSendButton();
+    scheduleComposerDraft();
     if(warn)Toast.makeText(this,"部分附件无法发送，请查看提示并移除或更换",Toast.LENGTH_LONG).show();
     if(ready!=null)ready.run();else startNextAttachmentImport();
    });
@@ -328,24 +622,91 @@ public class MainActivity extends AppCompatActivity {
  private void resumeAttachmentWork(){
   if(attachmentLoading||activeAttachmentImport!=null)return;if(!attachmentImports.isEmpty())startNextAttachmentImport();else if(!pendingAttachments.isEmpty()&&preparedAttachments.isEmpty())preparePendingAttachments();
  }
- private void saveIncomingState(Bundle out){
-  if(activeAttachmentImport!=null||attachmentLoading){
-   ++attachmentGeneration;if(attachmentTask!=null)attachmentTask.cancel(true);attachmentLoading=false;
-   if(activeAttachmentImport!=null){attachmentImports.addFirst(activeAttachmentImport);activeAttachmentImport=null;}
-  }
-  try{
-   JSONArray pending=new JSONArray();for(JSONObject d:pendingAttachments){JSONObject copy=new JSONObject(d.toString());copy.remove("payloadSnapshot");pending.put(copy);}
-   JSONArray requests=new JSONArray();for(IncomingShare.Request request:attachmentImports)requests.put(request.json());
-   out.putString("pendingAttachmentDescriptors",pending.toString());out.putString("attachmentImports",requests.toString());out.putString("composerDraft",composer==null?"":composer.getText().toString());out.putBoolean("sharedIntentConsumed",sharedIntentConsumed);
-  }catch(JSONException failure){android.util.Log.w("IncomingShare","Unable to preserve attachment draft");}
+ private void scheduleComposerDraft(){
+  if(!draftsReady||restoringDraft||draftSessionId.isEmpty())return;
+  draftHandler.removeCallbacks(saveDraft);
+  draftHandler.postDelayed(saveDraft,240);
  }
- private void restoreIncomingState(Bundle state){
-  if(state==null)return;sharedIntentConsumed=state.getBoolean("sharedIntentConsumed",false);composer.setText(state.getString("composerDraft",""));
+
+ private void persistComposerDraft(){
+  draftHandler.removeCallbacks(saveDraft);
+  if(!draftsReady||restoringDraft||draftSessionId.isEmpty())return;
+  EditText editor=expandedDraftEditor==null?composer:expandedDraftEditor;
   try{
-   JSONArray pending=new JSONArray(state.getString("pendingAttachmentDescriptors","[]"));for(int i=0;i<Math.min(pending.length(),AttachmentBatch.MAX_COUNT);i++){JSONObject d=pending.getJSONObject(i);if("content".equals(Uri.parse(d.optString("uri")).getScheme()))pendingAttachments.add(d);}
-   JSONArray requests=new JSONArray(state.getString("attachmentImports","[]"));for(int i=0;i<requests.length();i++)attachmentImports.addLast(IncomingShare.Request.restore(requests.getJSONObject(i)));
-  }catch(JSONException invalid){Toast.makeText(this,"部分待发文件无法恢复，请重新添加",Toast.LENGTH_LONG).show();}
-  renderAttachmentPreview();
+   JSONArray requests=new JSONArray();
+   if(activeAttachmentImport!=null)requests.put(activeAttachmentImport.json());
+   for(IncomingShare.Request request:attachmentImports)requests.put(request.json());
+   JSONObject draft=ComposerDraft.capture(editor.getText().toString(),editor.getSelectionStart(),editor.getSelectionEnd(),pendingAttachments,requests);
+   SessionRepository.get(prefs).saveComposerDraft(draftSessionId,draft);
+  }catch(JSONException failure){
+   android.util.Log.w("Composer","Unable to save conversation draft",failure);
+  }
+ }
+
+ private void switchComposerDraft(String id){
+  if(id.equals(draftSessionId))return;
+  persistComposerDraft();
+  ++attachmentGeneration;
+  if(attachmentTask!=null)attachmentTask.cancel(true);
+  activeAttachmentImport=null;
+  attachmentImports.clear();
+  attachmentLoading=false;
+  if(expandedComposerDialog!=null){
+   AlertDialog dialog=expandedComposerDialog;
+   expandedComposerDialog=null;
+   expandedDraftEditor=null;
+   dialog.dismiss();
+  }
+  draftSessionId=id;
+  applyComposerDraft(ComposerDraft.read(SessionRepository.get(prefs).composerDraft(id)));
+  if(draftsReady)resumeAttachmentWork();
+ }
+
+ private void applyComposerDraft(ComposerDraft draft){
+  restoringDraft=true;
+  try{
+   pendingAttachments.clear();
+   preparedAttachments.clear();
+   attachmentImports.clear();
+   composer.setText(draft.text);
+   composer.setSelection(draft.start,draft.end);
+   for(int i=0;i<Math.min(draft.attachments.length(),AttachmentBatch.MAX_COUNT);i++){
+    JSONObject entry=draft.attachments.optJSONObject(i);
+    if(entry!=null&&"content".equals(Uri.parse(entry.optString("uri")).getScheme()))pendingAttachments.add(entry);
+   }
+   for(int i=0;i<Math.min(draft.imports.length(),10);i++){
+    JSONObject request=draft.imports.optJSONObject(i);
+    if(request==null)continue;
+    try{attachmentImports.addLast(IncomingShare.Request.restore(request));}
+    catch(JSONException invalid){android.util.Log.w("Composer","Unable to restore a pending import",invalid);}
+   }
+   renderAttachmentPreview();
+   updateSendButton();
+  }finally{restoringDraft=false;}
+ }
+
+ private void saveIncomingState(Bundle out){
+  persistComposerDraft();
+  out.putBoolean("sharedIntentConsumed",sharedIntentConsumed);
+  out.putString("attachmentPickerSession",attachmentPickerSession);
+  if(markdownTarget!=null)out.putBundle("markdownTarget",markdownTarget.bundle());
+ }
+
+ private void restoreIncomingState(Bundle state){
+  if(state==null)return;
+  sharedIntentConsumed=state.getBoolean("sharedIntentConsumed",false);
+  attachmentPickerSession=state.getString("attachmentPickerSession","");
+  Bundle target=state.getBundle("markdownTarget");
+  if(target!=null)markdownTarget=MarkdownTarget.restore(target);
+  if(!state.containsKey("composerDraft")||SessionRepository.get(prefs).hasDraft(draftSessionId))return;
+  try{
+   JSONObject legacy=new JSONObject().put("text",state.getString("composerDraft",""))
+    .put("attachments",new JSONArray(state.getString("pendingAttachmentDescriptors","[]")))
+    .put("imports",new JSONArray(state.getString("attachmentImports","[]")));
+   applyComposerDraft(ComposerDraft.read(legacy));
+  }catch(JSONException invalid){
+   Toast.makeText(this,"部分待发文件无法恢复，请重新添加",Toast.LENGTH_LONG).show();
+  }
  }
  private void removePendingAttachment(JSONObject descriptor){
   String source=descriptor.optString("sourceUri",descriptor.optString("uri"));if(activeAttachmentImport!=null)activeAttachmentImport.uris.removeIf(uri->source.equals(uri.toString()));for(IncomingShare.Request request:attachmentImports)request.uris.removeIf(uri->source.equals(uri.toString()));
@@ -364,7 +725,6 @@ public class MainActivity extends AppCompatActivity {
   }
   attachmentPreview.addView(scroll,new LinearLayout.LayoutParams(-1,dp(108)));
  }
- private void saveAttachment(String sessionId,JSONArray descriptors,Map<String,String> payloads){if(descriptors.length()==0)return;try{JSONArray all=readSessions();for(int i=0;i<all.length();i++){JSONObject session=all.optJSONObject(i);if(session!=null&&sessionId.equals(session.optString("id"))){JSONArray messages=session.optJSONArray("messages");if(messages!=null&&messages.length()>0){JSONArray saved=new JSONArray();for(int j=0;j<descriptors.length();j++){JSONObject descriptor=descriptors.optJSONObject(j);if(descriptor==null)continue;JSONObject copy=new JSONObject(descriptor.toString());String payload=payloads.get(descriptor.optString("uri"));if(payload==null||AttachmentBatch.isFailure(payload))throw new IOException("附件内容未准备好，不能保存为已发送附件");if(!AttachmentSnapshots.has(copy))copy.put("payloadSnapshot",payload);saved.put(copy);}messages.getJSONObject(messages.length()-1).put("attachments",saved);persistSessions(all);}return;}}}catch(Exception e){android.util.Log.w("Attachment","Unable to persist attachment payload snapshot",e);}}
  private void appendAttachment(JSONObject descriptor){
   if(descriptor==null||messageList.getChildCount()==0)return;
   View row=messageList.getChildAt(messageList.getChildCount()-1);if(!(row instanceof LinearLayout))return;
@@ -382,8 +742,8 @@ public class MainActivity extends AppCompatActivity {
  private void previewAttachment(JSONObject descriptor){hideKeyboard();attachmentUi().preview(descriptor);}
  private String queryName(Uri u){String x="附件";try(android.database.Cursor c=getContentResolver().query(u,null,null,null,null)){if(c!=null&&c.moveToFirst()){int i=c.getColumnIndex(OpenableColumns.DISPLAY_NAME);if(i>=0)x=c.getString(i);}}catch(Exception ignored){}return x;}
  private void applyCustomTheme(){ThemePalette p=ThemePalette.resolve(this);purple=p.primary;page=p.page;card=p.surface;ink=p.ink;muted=p.muted;}
- private boolean preflight(){return preflight(false);}
- private boolean preflight(boolean skipHostedTools){
+ private boolean preflight(){return preflight(false,this::sendMessage);}
+ private boolean preflight(boolean skipHostedTools,Runnable retry){
   refreshModelLabels();JSONObject p=activeProvider(),m=ModelCapabilities.find(p,model);String problem="";
   try{
    String base=p.optString("api");if(NativeProtocols.nativeProtocol(protocol()))NativeProtocols.endpoint(base,protocol(),model,true);else ChatApiClient.endpoint(base,protocol());
@@ -399,24 +759,57 @@ public class MainActivity extends AppCompatActivity {
   if(skipHostedTools)search=search.withoutHostedTools();
   if(!search.error.isEmpty()||(search.tavily&&search.key.isEmpty())){
    TextView hint=label("当前联网搜索不可用。可以关闭联网继续，本次回答不会使用搜索结果。",15,ink,false);
-   new PanelDialog(this,"联网搜索未就绪","输入和附件会保留",hint).compact().action(AlertDialog.BUTTON_NEGATIVE,"取消",null).action(AlertDialog.BUTTON_NEUTRAL,"配置搜索",()->startActivity(new Intent(this,SettingsOptionActivity.class).putExtra("mode","search"))).action(AlertDialog.BUTTON_POSITIVE,"关闭联网继续",()->{scoped().edit().putBoolean("webSearchEnabled",false).apply();refreshModelLabels();sendMessage();}).show();return false;
+   new PanelDialog(this,"联网搜索未就绪","输入和附件会保留",hint).compact().action(AlertDialog.BUTTON_NEGATIVE,"取消",null).action(AlertDialog.BUTTON_NEUTRAL,"配置搜索",()->startActivity(new Intent(this,SettingsOptionActivity.class).putExtra("mode","search"))).action(AlertDialog.BUTTON_POSITIVE,"关闭联网继续",()->{scoped().edit().putBoolean("webSearchEnabled",false).apply();refreshModelLabels();retry.run();}).show();return false;
   }
   return true;
  }
- private void clearSentComposer(){composer.setText("");hideKeyboard();attachmentGeneration++;pendingAttachments.clear();preparedAttachments.clear();setAttachmentChoices(false);renderAttachmentPreview();updateSendButton();}
+ private void clearSentComposer(){
+  draftHandler.removeCallbacks(saveDraft);
+  restoringDraft=true;
+  try{
+   composer.setText("");
+   hideKeyboard();
+   ++attachmentGeneration;
+   pendingAttachments.clear();
+   preparedAttachments.clear();
+   setAttachmentChoices(false);
+   renderAttachmentPreview();
+   updateSendButton();
+  }finally{restoringDraft=false;}
+ }
  private void sendMessage(){
-  if(attachmentLoading){Toast.makeText(this,"附件正在准备，请稍候",Toast.LENGTH_SHORT).show();return;}
+  if(attachmentLoading||activeAttachmentImport!=null||!attachmentImports.isEmpty()){Toast.makeText(this,"附件正在准备，请稍候",Toast.LENGTH_SHORT).show();return;}
   for(JSONObject attachment:pendingAttachments){String payload=preparedAttachments.get(attachment.optString("uri"));if(payload==null||AttachmentBatch.isFailure(payload)){Toast.makeText(this,payload==null?"附件尚未准备完成":AttachmentBatch.failureMessage(payload),Toast.LENGTH_LONG).show();return;}}
   String text=composer.getText().toString().trim();if(text.isEmpty()&&pendingAttachments.isEmpty())return;if(!preflight())return;
   String sent=text.isEmpty()?"已添加附件":text;JSONArray descriptors=new JSONArray();
-  try{for(JSONObject d:pendingAttachments){JSONObject copy=new JSONObject(d.toString());String payload=preparedAttachments.get(d.optString("uri"));if(payload!=null&&!AttachmentSnapshots.has(copy))copy.put("payloadSnapshot",payload);descriptors.put(copy);}}catch(JSONException invalid){return;}
+  long inlineCharacters=0;
+  try{for(JSONObject d:pendingAttachments){JSONObject copy=new JSONObject(d.toString());String payload=preparedAttachments.get(d.optString("uri"));if(payload!=null&&!AttachmentSnapshots.has(copy))copy.put("payloadSnapshot",payload);
+    if(payload!=null&&!AttachmentSnapshots.isPdfPayload(payload))inlineCharacters+=payload.length();
+    descriptors.put(copy);
+   }
+  }catch(JSONException invalid){Toast.makeText(this,"附件无法保存，请重新选择。",Toast.LENGTH_LONG).show();return;}
+  if(inlineCharacters>AttachmentSnapshots.requestCharacterLimit()){
+   Toast.makeText(this,"本次图片和文本文档过大，请减少附件数量。",Toast.LENGTH_LONG).show();
+   return;
+  }
   if(ChatGenerationService.active(prefs.getString("currentSessionId",""))!=null){
    try{JSONObject queued=new JSONObject().put("message",new JSONObject().put("id",UUID.randomUUID().toString()).put("user",true).put("text",sent).put("timestamp",System.currentTimeMillis()).put("attachments",descriptors)).put("config",new JSONObject(((SessionConfig)scoped()).values.toString()));
-    ChatGenerationService.enqueue(this,prefs.getString("currentSessionId",""),queued);clearSentComposer();Toast.makeText(this,"已加入队列，将在本次回复结束后发送",Toast.LENGTH_SHORT).show();refreshHistory();
+    ChatGenerationService.enqueue(this,prefs.getString("currentSessionId",""),queued);clearSentComposer();JSONObject session=MessageEdits.findSession(readSessions(),visibleSession);if(session!=null)updateQueueRow(session);Toast.makeText(this,"已加入队列，将在本次回复结束后发送",Toast.LENGTH_SHORT).show();refreshHistory();
    }catch(Exception failure){Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show();}return;
   }
-  follow.begin();Map<String,String> payloads=new HashMap<>(preparedAttachments);String sessionId=saveCurrentMessage(sent,true,null);saveAttachment(sessionId,descriptors,payloads);clearSentComposer();
-  JSONObject session=MessageEdits.findSession(readSessions(),sessionId);if(session!=null)renderSessionMessages(session,Math.max(0,session.optJSONArray("messages").length()-40));
+  follow.begin();
+  String sessionId=saveCurrentMessage(sent,true,null,descriptors);
+  if(sessionId.isEmpty()){
+   Toast.makeText(this,"消息未能保存，输入内容已保留。",Toast.LENGTH_LONG).show();
+   return;
+  }
+  Map<String,String> payloads=new HashMap<>(preparedAttachments);
+  clearSentComposer();
+  JSONObject session=MessageEdits.findSession(readSessions(),sessionId);if(session!=null){
+   int y=conversationScroll.getScrollY();
+   renderSessionMessages(session,Math.max(0,session.optJSONArray("messages").length()-40));
+   if(!follow.following())restoreScroll(y);
+  }
   ReplyContext request=captureRequest(sessionId);LinearLayout row=loadingRow();row.setTag(request);request.visibleRow=row;messageList.addView(row);activeReply=request;sending=true;updateSendButton();scrollBottom();
   JSONObject p=activeProvider();launchGeneration(request,p.optString("api"),p.optString("apiKey"),buildMessages(),session,payloads,text.isEmpty()?sent:text);
  }
@@ -433,30 +826,32 @@ public class MainActivity extends AppCompatActivity {
    if(first==null)return;
    if(!session.optBoolean("titleFallback",false)){
     session.put("title",fallbackTitle(first)).put("titleFallback",true);
-    persistSessions(all);refreshHistory();
+    SessionRepository.get(prefs).upsert(session);refreshConversationTitle();refreshHistory();
    }
    if(!prefs.getBoolean("topicEnabled",false)||topicRequestsInFlight.contains(sessionId))return;
    TopicConfig config;
    try{config=new TopicConfig(prefs);}catch(Exception invalid){return;}
    firstMessage=first.optString("text","").trim();
-   if(firstMessage.isEmpty()||("已添加附件".equals(firstMessage)&&first.has("attachment")))firstMessage=fallbackTitle(first);
+   if(firstMessage.isEmpty()||"已添加附件".equals(firstMessage)&&(first.has("attachment")||first.has("attachments")))firstMessage=fallbackTitle(first);
    final String titleSourceId=first.optString("id"),titleSourceText=first.optString("text");
    topicRequestsInFlight.add(sessionId);
    android.util.Log.i("TopicNaming","Request started for session "+sessionId);
    apiClient.topic(config.base,config.key,config.model,config.prompt,firstMessage,config.protocol,new ChatApiClient.CallbackResult<String>() {
     public void onSuccess(String title){runOnUiThread(()->{
      try {
+      if(isDestroyed())return;
       String clean=ChatResponseParser.cleanTitle(title,false);
-      JSONArray latest=readSessions();boolean updated=false;
-      for(int i=0;i<latest.length();i++){JSONObject s=latest.optJSONObject(i);if(s!=null&&sessionId.equals(s.optString("id"))&&canAutomaticallyTitle(s)&&firstUserMessage(s)!=null&&titleSourceId.equals(firstUserMessage(s).optString("id"))&&titleSourceText.equals(firstUserMessage(s).optString("text"))){s.put("title",clean).put("titleAutomatic",true).put("titleFallback",false);updated=true;break;}}
-      if(updated){
-       if(!prefs.edit().putString("sessions",latest.toString()).commit()){topicFailure(sessionId,"persistence_error：无法保存标题");return;}
+      JSONObject latest=MessageEdits.findSession(readSessions(),sessionId),firstNow=firstUserMessage(latest);
+      if(canAutomaticallyTitle(latest)&&firstNow!=null&&titleSourceId.equals(firstNow.optString("id"))&&titleSourceText.equals(firstNow.optString("text"))){
+       latest.put("title",clean).put("titleAutomatic",true).put("titleFallback",false);
+       SessionRepository.get(prefs).upsert(latest);
+       refreshConversationTitle();
        refreshHistory();
-      } else {Toast.makeText(MainActivity.this,"命名结果未应用：目标对话已删除或已重命名",Toast.LENGTH_SHORT).show();}
-      android.util.Log.i("TopicNaming",(updated?"Title saved for ":"Title skipped for ")+sessionId);
+       android.util.Log.i("TopicNaming","Title saved for "+sessionId);
+      }
      }catch(Exception e){topicFailure(sessionId,"persistence_error：无法清理或保存标题");}finally{topicRequestsInFlight.remove(sessionId);}
     });}
-    public void onError(String message){runOnUiThread(()->{topicRequestsInFlight.remove(sessionId);topicFailure(sessionId,message);});}
+    public void onError(String message){runOnUiThread(()->{topicRequestsInFlight.remove(sessionId);if(!isDestroyed())topicFailure(sessionId,message);});}
    });
   }catch(IllegalArgumentException e){android.util.Log.w("TopicNaming","Incomplete configuration for session "+sessionId);Toast.makeText(this,e.getMessage(),Toast.LENGTH_LONG).show();}
   catch(Exception e){topicRequestsInFlight.remove(sessionId);topicFailure(sessionId,"configuration_error");}
@@ -508,8 +903,15 @@ public class MainActivity extends AppCompatActivity {
  private void showMessageActions(String sessionId,String messageId){
   if(sending){Toast.makeText(this,"请等待当前回复完成",Toast.LENGTH_SHORT).show();return;}
   JSONObject message=findMessage(sessionId,messageId);if(message==null)return;
-  boolean user=message.optBoolean("user");String[] actions=user?new String[]{"编辑","重试","复制","消息详情"}:new String[]{"编辑","重试","复制","消息详情","继续回答"};
-  ChoiceDialogs.single(this,user?"用户消息操作":"模型消息操作",actions,-1,which->{if(which==3)showMessageDetails(message);else if(which==4)retryConversation(sessionId);else performMessageAction(sessionId,messageId,which);});
+  boolean user=message.optBoolean("user");
+  String[] actions=user?new String[]{"编辑","重试","复制","消息详情","导出此消息为 Markdown"}:
+   new String[]{"编辑","重试","复制","消息详情","继续回答","导出此消息为 Markdown"};
+  ChoiceDialogs.single(this,user?"用户消息操作":"模型消息操作",actions,-1,which->{
+   if(which==actions.length-1)startMarkdownExport(sessionId,messageId);
+   else if(which==3)showMessageDetails(message);
+   else if(which==4)continueReply(sessionId,messageId);
+   else performMessageAction(sessionId,messageId,which);
+  });
  }
  private void performMessageAction(String sessionId,String messageId,int which){
   if(sending){Toast.makeText(this,"请等待当前回复完成",Toast.LENGTH_SHORT).show();return;}
@@ -534,7 +936,7 @@ public class MainActivity extends AppCompatActivity {
  }
  private void applyMessageEdit(String sessionId,String messageId,String value,boolean retry,boolean skipHostedTools){
   if(sending||!sessionId.equals(prefs.getString("currentSessionId","")))return;
-  if(skipHostedTools&&!preflight(true))return;
+  if(skipHostedTools&&!preflight(true,()->applyMessageEdit(sessionId,messageId,value,retry,true)))return;
   try{
    JSONArray sessions=readSessions();
    JSONObject session=ConversationBranches.edit(sessions,sessionId,messageId,value,retry);
@@ -545,9 +947,19 @@ public class MainActivity extends AppCompatActivity {
    if(retry)retryConversation(sessionId,skipHostedTools);
   }catch(JSONException e){Toast.makeText(this,"无法保存消息",Toast.LENGTH_SHORT).show();}
  }
+ private void continueReply(String sessionId,String messageId){
+  if(sending||!sessionId.equals(prefs.getString("currentSessionId","")))return;
+  JSONObject session=MessageEdits.findSession(readSessions(),sessionId);
+  if(session==null)return;
+  JSONArray messages=session.optJSONArray("messages");
+  int index=MessageEdits.indexOf(messages,messageId);
+  if(index<0)return;
+  if(index==messages.length()-1)retryConversation(sessionId);
+  else applyMessageEdit(sessionId,messageId,messages.optJSONObject(index).optString("text"),true);
+ }
  private void retryConversation(String sessionId){retryConversation(sessionId,false);}
  private void retryConversation(String sessionId,boolean skipHostedTools){
-  if(sending||!sessionId.equals(prefs.getString("currentSessionId",""))||!preflight(skipHostedTools))return;
+  if(sending||!sessionId.equals(prefs.getString("currentSessionId",""))||!preflight(skipHostedTools,()->retryConversation(sessionId,skipHostedTools)))return;
   follow.begin();
   ReplyContext request=captureRequest(sessionId);
   if(skipHostedTools)request.search=request.search.withoutHostedTools();
@@ -606,14 +1018,39 @@ public class MainActivity extends AppCompatActivity {
   return timestamp;
  }
  private HistoryBrowser historyBrowser;private boolean showingArchived;
- private void refreshHistory(){if(historyBrowser!=null)historyBrowser.refresh(readSessions(),prefs.getString("currentSessionId",""));}
+ private void refreshHistory(){
+  if(historyBrowser==null)return;
+  SessionRepository repository=SessionRepository.get(prefs);
+  historyBrowser.refresh(repository.snapshots(),prefs.getString("currentSessionId",""),repository.draftIds());
+ }
  private void showSessionActions(JSONObject session){
   String time=new SimpleDateFormat("yyyy年M月d日 HH:mm",Locale.getDefault()).format(new Date(sessionTimestamp(session,System.currentTimeMillis())));
   LinearLayout actions=new LinearLayout(this);actions.setOrientation(LinearLayout.VERTICAL);PanelDialog dialog=new PanelDialog(this,session.optString("title","对话操作"),"对话时间 · "+time,actions).compact();
-  String[] titles={"重命名",session.optBoolean("pinned")?"取消置顶":"置顶",session.optBoolean("archived")?"取消归档":"归档","对话设置","用量与详情","删除对话","清空排队消息"};
+  String[] titles={"重命名",session.optBoolean("pinned")?"取消置顶":"置顶",session.optBoolean("archived")?"取消归档":"归档","对话设置","用量与详情","删除对话","清空排队消息","导出为 Markdown"};
   for(int i=0;i<titles.length;i++){final int action=i;TextView item=label(titles[i],16,ink,false);item.setGravity(Gravity.CENTER_VERTICAL);item.setPadding(dp(16),0,dp(16),0);UiStyle.clickable(item,card,14);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,dp(48));params.bottomMargin=dp(6);actions.addView(item,params);
-   item.setOnClickListener(v->{dialog.dismiss();if(action==0)renameSession(session);else if(action==1||action==2){try{session.put(action==1?"pinned":"archived",!session.optBoolean(action==1?"pinned":"archived"));SessionRepository.get(prefs).upsert(session);refreshHistory();}catch(JSONException ignored){}}
-    else if(action==3){restoreSession(session);closeHistory();showConversationSettings();}else if(action==4)showSessionDetails(session);else if(action==5)confirmDeleteSession(session);else {session.remove("outbox");SessionRepository.get(prefs).upsert(session);Toast.makeText(this,"已清空队列",Toast.LENGTH_SHORT).show();}});
+   item.setOnClickListener(v->{
+    dialog.dismiss();
+    JSONObject latest=MessageEdits.findSession(readSessions(),session.optString("id"));
+    if(latest==null)return;
+    if(action==0)renameSession(latest);
+    else if(action==1||action==2){
+     try{
+      String field=action==1?"pinned":"archived";
+      latest.put(field,!latest.optBoolean(field));
+      SessionRepository.get(prefs).upsert(latest);
+      refreshHistory();
+     }catch(JSONException invalid){Toast.makeText(this,"无法更新对话。",Toast.LENGTH_SHORT).show();}
+    }else if(action==3){restoreSession(latest);closeHistory();showConversationSettings();}
+    else if(action==4)showSessionDetails(latest);
+    else if(action==5)confirmDeleteSession(latest);
+    else if(action==7)startMarkdownExport(latest.optString("id"),"");
+    else {
+     latest.remove("outbox");
+     SessionRepository.get(prefs).upsert(latest);
+     if(latest.optString("id").equals(visibleSession))updateQueueRow(latest);
+     Toast.makeText(this,"已清空队列",Toast.LENGTH_SHORT).show();
+    }
+   });
   }dialog.action(AlertDialog.BUTTON_NEGATIVE,"关闭",null).show();
  }
  private void renameSession(JSONObject session){
@@ -631,55 +1068,175 @@ public class MainActivity extends AppCompatActivity {
   PanelDialog dialog=new PanelDialog(this,"删除对话？",session.optString("title",""),message).compact();
   dialog.action(AlertDialog.BUTTON_NEGATIVE,"取消",null).action(AlertDialog.BUTTON_POSITIVE,"删除",()->deleteSession(session.optString("id")));dialog.show();
  }
- private void updateSession(String id,String title){JSONArray sessions=readSessions();for(int i=0;i<sessions.length();i++){JSONObject s=sessions.optJSONObject(i);if(s!=null&&id.equals(s.optString("id")))try{s.put("title",title).put("titleManual",true).put("titleFallback",false);}catch(Exception ignored){}}persistSessions(sessions);refreshConversationTitle();refreshHistory();}
+ private void updateSession(String id,String title){
+  JSONObject session=MessageEdits.findSession(readSessions(),id);
+  if(session==null)return;
+  try{
+   session.put("title",title).put("titleManual",true).put("titleFallback",false);
+   SessionRepository.get(prefs).upsert(session);
+   refreshConversationTitle();
+   refreshHistory();
+  }catch(JSONException invalid){Toast.makeText(this,"无法保存名称。",Toast.LENGTH_SHORT).show();}
+ }
  private void deleteSession(String id){
   if(ChatGenerationService.active(id)!=null){Toast.makeText(this,"请先停止这段对话的回复",Toast.LENGTH_SHORT).show();return;}
   JSONArray old=readSessions(),updated=new JSONArray();for(int i=0;i<old.length();i++){JSONObject session=old.optJSONObject(i);if(session!=null&&!id.equals(session.optString("id")))updated.put(session);}
-  try{if(updated.length()==0)updated.put(newSession());}catch(JSONException ignored){}SessionRepository.get(prefs).replace(updated);
+  try{if(updated.length()==0)updated.put(newSession());}catch(JSONException ignored){}SessionRepository.get(prefs).replaceAndClear(updated,Collections.singletonList(id));
   if(id.equals(prefs.getString("currentSessionId",""))&&updated.length()>0)restoreSession(updated.optJSONObject(updated.length()-1));refreshHistory();
  }
- private int visibleStart;private String visibleSession="";
- private void restoreSession(JSONObject session){
-  if(messageList==null)return;cacheCodeViewStates();String previous=prefs.getString("currentSessionId","");viewportPositions.put(previous,conversationScroll.getScrollY());prefs.edit().putString("currentSessionId",session.optString("id")).apply();
-  generation=ChatGenerationService.active(session.optString("id"));sending=generation!=null;activeReply=null;generationBody=null;showingBackgroundRun=false;updateSendButton();follow.detach();refreshModelLabels();
-  JSONArray messages=session.optJSONArray("messages");renderSessionMessages(session,Math.max(0,(messages==null?0:messages.length())-40));
-  int ticket=++restoreGeneration;int y=viewportPositions.getOrDefault(session.optString("id"),-1);conversationScroll.post(()->{if(ticket==restoreGeneration){if(y<0)conversationScroll.fullScroll(View.FOCUS_DOWN);else conversationScroll.scrollTo(0,y);}});
-  if(generation!=null)renderGeneration(generation);refreshConversationTitle();
- }
- private void renderSessionMessages(JSONObject session,int start){
-  cacheCodeViewStates();if(messageList.getChildCount()>1)messageList.removeViews(1,messageList.getChildCount()-1);JSONArray messages=session.optJSONArray("messages");if(messages==null)return;
-  visibleSession=session.optString("id");visibleStart=Math.max(0,start);int end=Math.min(messages.length(),visibleStart+40);
-  if(visibleStart>0)addPageButton("查看更早的消息",()->{renderSessionMessages(session,Math.max(0,visibleStart-40));conversationScroll.post(()->conversationScroll.scrollTo(0,0));});
-  for(int i=visibleStart;i<end;i++){
-   JSONObject m=messages.optJSONObject(i);
-   if(m==null)continue;
-   boolean user=m.optBoolean("user"),error=!user&&m.optBoolean("error");
-   addMessage(error?"":m.optString("text"),user,m.optString("attachment",null),m.optLong("timestamp"),m.optString("modelId",m.optString("model","")));
-   LinearLayout row=(LinearLayout)messageList.getChildAt(messageList.getChildCount()-1);
-   row.setTag("message:"+m.optString("id"));
-   if(!user){
-    bindReasoning(row,m.optString("id"),m.optString("reasoningContent"),false,m.optBoolean("interrupted")||error,"summary".equals(m.optString("reasoningKind")));
-    MarkdownMessageView answer=row.findViewWithTag("markdown-message");
-    if(answer!=null)answer.setVisibility(error||m.optString("text").isEmpty()&&!m.optString("reasoningContent").isEmpty()?View.GONE:View.VISIBLE);
-   }
-   bindMessageActions(row,session.optString("id"),m);
-   bindVersions(row,session,m);
-   if(!user){
-    addSearchCard(row,m.optString("searchStatus",m.optString("searchNote")),m.has("sources")?SearchSources.parse(m.optJSONArray("sources")):SearchSources.legacy(m.optString("searchResults",m.optString("searchText"))),m.optString("searchResults",m.optString("searchText")));
-    if(error)bindFailure(row,m);
-    else bindCompletion(row,session.optString("id"),m);
-   }
-   JSONArray attachments=m.optJSONArray("attachments");if(m.optBoolean("user")&&attachments!=null)for(int j=0;j<attachments.length();j++)appendAttachment(attachments.optJSONObject(j));
+ private int visibleStart,visibleEnd;
+ private boolean visibleLatest=true;
+ private String visibleSession="",visibleBranch="";
+
+ private static final class Viewport{
+  final String branch;
+  final int start,y;
+  final boolean latest,following;
+  Viewport(String branch,int start,int y,boolean latest,boolean following){
+   this.branch=branch;this.start=start;this.y=y;this.latest=latest;this.following=following;
   }
-  if(end<messages.length())addPageButton("查看后续消息",()->{renderSessionMessages(session,end);conversationScroll.post(()->conversationScroll.scrollTo(0,0));});
-  JSONArray queue=session.optJSONArray("outbox");if(queue!=null&&queue.length()>0)addPageButton("有 "+queue.length()+" 条排队消息"+(sending?"":" · 点击继续发送"),()->{if(!sending)ChatGenerationService.resumeQueue(this,session.optString("id"));});
-  if(codeViewStates.size()>160){Iterator<String> keys=codeViewStates.keySet().iterator();while(codeViewStates.size()>120&&keys.hasNext()){keys.next();keys.remove();}}
+  Bundle bundle(String id){
+   Bundle data=new Bundle();
+   data.putString("session",id);data.putString("branch",branch);
+   data.putInt("start",start);data.putInt("y",y);data.putBoolean("latest",latest);data.putBoolean("following",following);
+   return data;
+  }
+  static Viewport from(Bundle data){
+   return new Viewport(data.getString("branch",""),data.getInt("start"),data.getInt("y"),data.getBoolean("latest"),data.getBoolean("following"));
+  }
  }
- private void addPageButton(String text,Runnable action){TextView view=label(text,13,purple,false);view.setGravity(Gravity.CENTER);view.setMinHeight(dp(48));view.setOnClickListener(v->action.run());messageList.addView(view,new LinearLayout.LayoutParams(-1,-2));}
- private void bindReasoning(LinearLayout row,String messageId,String text,boolean thinking,boolean interrupted,boolean summary){
+
+ private void saveViewport(){
+  if(visibleSession.isEmpty())return;
+  viewports.remove(visibleSession);
+  viewports.put(visibleSession,new Viewport(visibleBranch,visibleStart,conversationScroll.getScrollY(),visibleLatest,follow.following()));
+  if(viewports.size()>80)viewports.remove(viewports.keySet().iterator().next());
+ }
+
+ private void restoreScroll(int y){
+  int ticket=++restoreGeneration;
+  conversationScroll.post(()->{if(ticket==restoreGeneration)conversationScroll.scrollTo(0,y);});
+ }
+
+ private void restoreSession(JSONObject session){
+  if(messageList==null||session==null)return;
+  saveViewport();
+  String id=session.optString("id");
+  if(conversationFind!=null&&(!id.equals(visibleSession)||!session.optString("activeBranchId").equals(visibleBranch)))conversationFind.hide();
+  prefs.edit().putString("currentSessionId",id).apply();
+  switchComposerDraft(id);
+  generation=ChatGenerationService.active(id);
+  sending=generation!=null;
+  updateSendButton();
+  refreshModelLabels();
+  JSONArray messages=session.optJSONArray("messages");
+  int tail=Math.max(0,(messages==null?0:messages.length())-40);
+  Viewport viewport=viewports.get(id);
+  if(viewport!=null&&!viewport.branch.equals(session.optString("activeBranchId")))viewport=null;
+  ++restoreGeneration;
+  follow.detach();
+  renderSessionMessages(session,viewport==null||viewport.latest?tail:viewport.start);
+  if(viewport==null||viewport.latest&&viewport.following)follow.resume();
+  else restoreScroll(viewport.y);
+  if(generation!=null)renderGeneration(generation);
+  refreshConversationTitle();
+ }
+
+ private void renderSessionMessages(JSONObject session,int start){
+  cacheCodeViewStates();
+  clearLiveRow();
+  clearMessageHighlight();
+  if(messageList.getChildCount()>1)messageList.removeViews(1,messageList.getChildCount()-1);
+  JSONArray messages=session.optJSONArray("messages");
+  int count=messages==null?0:messages.length();
+  visibleSession=session.optString("id");
+  visibleBranch=session.optString("activeBranchId");
+  visibleStart=Math.max(0,Math.min(start,Math.max(0,count-1)));
+  visibleEnd=Math.min(count,visibleStart+40);
+  visibleLatest=visibleEnd==count;
+  final String sessionId=visibleSession;
+  int prior=Math.max(0,visibleStart-40),next=visibleEnd;
+  if(visibleStart>0)addPageButton("查看更早的消息",()->showPage(sessionId,prior));
+  for(int i=visibleStart;i<visibleEnd;i++){
+   JSONObject message=messages.optJSONObject(i);
+   if(message!=null)renderSavedMessage(session,message);
+  }
+  if(!visibleLatest)addPageButton("查看后续消息",()->showPage(sessionId,next));
+  updateQueueRow(session);
+  updateBottomButton();
+  if(codeViewStates.size()>160){
+   Iterator<String> keys=codeViewStates.keySet().iterator();
+   while(codeViewStates.size()>120&&keys.hasNext()){keys.next();keys.remove();}
+  }
+ }
+
+ private void showPage(String sessionId,int start){
+  if(!sessionId.equals(visibleSession))return;
+  JSONObject session=MessageEdits.findSession(readSessions(),sessionId);
+  if(session==null)return;
+  follow.detach();
+  renderSessionMessages(session,start);
+  if(generation!=null&&!generation.finished)renderGeneration(generation);
+  restoreScroll(0);
+ }
+
+ private void renderSavedMessage(JSONObject session,JSONObject message){
+  boolean user=message.optBoolean("user"),error=!user&&message.optBoolean("error");
+  addMessage(error?"":message.optString("text"),user,message.optString("attachment",null),message.optLong("timestamp"),message.optString("modelId",message.optString("model","")));
+  LinearLayout row=(LinearLayout)messageList.getChildAt(messageList.getChildCount()-1);
+  bindSavedMessage(row,session,message);
+  JSONArray attachments=message.optJSONArray("attachments");
+  if(user&&attachments!=null)for(int i=0;i<attachments.length();i++)appendAttachment(attachments.optJSONObject(i));
+ }
+
+ private void bindSavedMessage(LinearLayout row,JSONObject session,JSONObject message){
+  String id=message.optString("id"),sessionId=session.optString("id");
+  boolean user=message.optBoolean("user"),error=!user&&message.optBoolean("error");
+  row.setTag("message:"+id);
+  if(!user){
+   String thought=message.optString("reasoningContent");
+   bindReasoning(row,id,thought,false,message.optBoolean("interrupted")||error,"summary".equals(message.optString("reasoningKind")),false);
+   MarkdownMessageView answer=row.findViewWithTag("markdown-message");
+   if(answer!=null)answer.setVisibility(error||message.optString("text").isEmpty()&&!thought.isEmpty()?View.GONE:View.VISIBLE);
+  }
+  bindMessageActions(row,sessionId,message);
+  bindVersions(row,session,message);
+  if(!user){
+   String legacy=message.optString("searchResults",message.optString("searchText"));
+   SearchSources sources=message.has("sources")?SearchSources.parse(message.optJSONArray("sources")):SearchSources.legacy(legacy);
+   addSearchCard(row,message.optString("searchStatus",message.optString("searchNote")),sources,legacy);
+   if(error)bindFailure(row,message);
+   else bindCompletion(row,sessionId,message);
+  }
+ }
+
+ private void removeQueueRow(){
+  View queue=messageList.findViewWithTag("queue-page");
+  if(queue!=null)messageList.removeView(queue);
+ }
+
+ private void updateQueueRow(JSONObject session){
+  removeQueueRow();
+  JSONArray queue=session.optJSONArray("outbox");
+  if(queue==null||queue.length()==0)return;
+  String id=session.optString("id");
+  boolean active=ChatGenerationService.active(id)!=null;
+  TextView button=addPageButton("有 "+queue.length()+" 条排队消息"+(active?"":" · 点击继续发送"),()->{
+   String problem=ChatGenerationService.resumeQueue(this,id);
+   if(!problem.isEmpty())Toast.makeText(this,problem,Toast.LENGTH_LONG).show();
+  });
+  button.setTag("queue-page");
+  if(activeReply!=null&&activeReply.visibleRow!=null&&activeReply.visibleRow.getParent()==messageList){
+   int index=messageList.indexOfChild(activeReply.visibleRow);
+   messageList.removeView(button);
+   messageList.addView(button,index);
+  }
+ }
+ private TextView addPageButton(String text,Runnable action){TextView view=label(text,13,purple,false);view.setGravity(Gravity.CENTER);view.setMinHeight(dp(48));view.setOnClickListener(v->action.run());messageList.addView(view,new LinearLayout.LayoutParams(-1,-2));return view;}
+ private void bindReasoning(LinearLayout row,String messageId,String text,boolean thinking,boolean interrupted,boolean summary,boolean streaming){
   ReasoningView view=row.findViewWithTag("reasoning-view");if(view==null&&(text==null||text.isEmpty()))return;
   if(view==null){if(markwon==null)markwon=MarkdownRenderer.create(this);view=new ReasoningView(this,markwon,expanded->{reasoningExpanded.put(messageId,expanded);if(reasoningExpanded.size()>160){Iterator<String> keys=reasoningExpanded.keySet().iterator();if(keys.hasNext()){keys.next();keys.remove();}}if(follow!=null)follow.detach();});((LinearLayout)row.getChildAt(0)).addView(view,0,new LinearLayout.LayoutParams(-1,-2));}
-  view.bind(text,thinking,interrupted,summary,Boolean.TRUE.equals(reasoningExpanded.get(messageId)));
+  view.bind(text,thinking,interrupted,summary,Boolean.TRUE.equals(reasoningExpanded.get(messageId)),streaming);
  }
  private void bindFailure(LinearLayout row,JSONObject message){
   LinearLayout box=(LinearLayout)row.getChildAt(0);
@@ -701,19 +1258,64 @@ public class MainActivity extends AppCompatActivity {
   if(row.findViewWithTag("search-heading")!=null)note="";
   boolean omitted=message.optInt("omittedMessages")>0;metadata.setVisibility(state.equals("complete")&&note.isEmpty()&&!omitted?View.GONE:View.VISIBLE);metadata.setText((state.equals("complete")?"":new GenerationResult(state,message.optString("finishReason"),message.optJSONObject("usage")).label())+(note.isEmpty()?"":" · "+note));metadata.setTextColor(muted);if(state.equals("complete")&&omitted){metadata.setText("本次已省略较早的上下文 · 查看详情  ›");metadata.setMinHeight(dp(44));metadata.setOnClickListener(v->showMessageDetails(message));}
   if(state.equals("truncated")||state.equals("interrupted")||state.equals("incomplete")){
-   metadata.setMinHeight(dp(44));metadata.setText(metadata.getText()+"  ›");metadata.setOnClickListener(v->retryConversation(sessionId));
+   metadata.setMinHeight(dp(44));metadata.setText(metadata.getText()+"  ›");metadata.setOnClickListener(v->continueReply(sessionId,message.optString("id")));
   }
  }
+ private View highlightedMessage;
+
  private void openSearchResult(String id,String messageId,String query){
-  JSONObject session=MessageEdits.findSession(readSessions(),id);if(session==null)return;restoreSession(session);closeHistory();if(messageId.isEmpty())return;
-  JSONArray messages=session.optJSONArray("messages");for(int i=0;messages!=null&&i<messages.length();i++)if(messageId.equals(messages.optJSONObject(i).optString("id"))){renderSessionMessages(session,Math.max(0,i-3));break;}
-  View target=messageList.findViewWithTag("message:"+messageId);if(target!=null){target.setBackground(UiStyle.surface(this,androidx.core.graphics.ColorUtils.blendARGB(page,purple,.07f),12,false));conversationScroll.post(()->conversationScroll.smoothScrollTo(0,target.getTop()));}
+  JSONObject session=MessageEdits.findSession(readSessions(),id);
+  if(session==null)return;
+  restoreSession(session);
+  closeHistory();
+  if(!messageId.isEmpty())jumpToMessage(id,messageId,false);
+ }
+
+ private boolean jumpToMessage(String id,String messageId,boolean expandReasoning){
+  if(!id.equals(visibleSession))return false;
+  JSONObject session=MessageEdits.findSession(readSessions(),id);
+  if(session==null)return false;
+  JSONArray messages=session.optJSONArray("messages");
+  int index=MessageEdits.indexOf(messages,messageId);
+  if(index<0)return false;
+  follow.detach();
+  if(expandReasoning)reasoningExpanded.put(messageId,true);
+  if(index<visibleStart||index>=visibleEnd){
+   renderSessionMessages(session,Math.max(0,Math.min(index-3,messages.length()-40)));
+  }
+  if(generation!=null&&!generation.finished)renderGeneration(generation);
+  View target=messageList.findViewWithTag("message:"+messageId);
+  if(target==null)return false;
+  if(expandReasoning&&target instanceof LinearLayout){
+   JSONObject message=messages.optJSONObject(index);
+   bindReasoning((LinearLayout)target,messageId,message.optString("reasoningContent"),false,
+    message.optBoolean("interrupted"),"summary".equals(message.optString("reasoningKind")),false);
+  }
+  clearMessageHighlight();
+  highlightedMessage=target;
+  target.setBackground(UiStyle.surface(this,androidx.core.graphics.ColorUtils.blendARGB(page,purple,.10f),12,false));
+  int ticket=++restoreGeneration;
+  Runnable scroll=()->{
+   if(ticket==restoreGeneration&&target.getParent()==messageList)conversationScroll.smoothScrollTo(0,target.getTop());
+  };
+  if(target.isLaidOut())target.post(scroll);
+  else target.addOnLayoutChangeListener(new View.OnLayoutChangeListener(){
+   public void onLayoutChange(View view,int l,int t,int r,int b,int ol,int ot,int or,int ob){
+    view.removeOnLayoutChangeListener(this);
+    scroll.run();
+   }
+  });
+  return true;
+ }
+
+ private void clearMessageHighlight(){
+  if(highlightedMessage!=null){highlightedMessage.setBackground(null);highlightedMessage=null;}
  }
  private JSONArray readSessions(){if(prefs==null)return new JSONArray();JSONArray sessions=SessionRepository.get(prefs).read();return sessions;}
  private void persistSessions(JSONArray all){try{for(int i=0;i<all.length();i++){JSONObject session=all.optJSONObject(i);if(session!=null)ConversationBranches.sync(session);}}catch(JSONException failure){throw new IllegalStateException("无法保存版本",failure);}SessionRepository.get(prefs).replace(all);}
  private void activateSession(JSONArray sessions,JSONObject session){SessionRepository.get(prefs).replace(sessions);prefs.edit().putString("currentSessionId",session.optString("id")).apply();}
  private JSONObject newSession()throws JSONException{return new JSONObject().put("id",UUID.randomUUID().toString()).put("title","新对话").put("createdAt",System.currentTimeMillis()).put("updatedAt",System.currentTimeMillis()).put("time",new SimpleDateFormat("MM-dd HH:mm",Locale.getDefault()).format(new Date())).put("messages",new JSONArray()).put("config",SessionConfig.captureForNew(prefs,MessageEdits.findSession(readSessions(),prefs.getString("currentSessionId",""))));}
- private boolean reusableEmpty(JSONObject session){JSONArray messages=session==null?null:session.optJSONArray("messages");return messages!=null&&messages.length()==0&&"新对话".equals(session.optString("title","新对话"))&&!session.optBoolean("titleManual",false)&&!session.optBoolean("titleAutomatic",false);}
+ private boolean reusableEmpty(JSONObject session){JSONArray messages=session==null?null:session.optJSONArray("messages");return messages!=null&&messages.length()==0&&"新对话".equals(session.optString("title","新对话"))&&!SessionRepository.get(prefs).hasDraft(session.optString("id"))&&!session.optBoolean("titleManual",false)&&!session.optBoolean("titleAutomatic",false);}
  private JSONObject ensureCurrentSession(JSONArray sessions)throws JSONException{
   String id=prefs.getString("currentSessionId","");JSONObject empty=null;
   for(int i=0;i<sessions.length();i++){JSONObject session=sessions.optJSONObject(i);if(session==null)continue;if(id.equals(session.optString("id"))){if(session.optJSONArray("messages")==null)session.put("messages",new JSONArray());return session;}if(empty==null&&reusableEmpty(session))empty=session;}
@@ -741,8 +1343,34 @@ public class MainActivity extends AppCompatActivity {
   try{JSONObject session=MessageEdits.findSession(readSessions(),prefs.getString("currentSessionId",""));if(session!=null&&!session.optString("title","").trim().isEmpty())title=session.optString("title");}catch(Exception ignored){}
   UiStyle.textIfChanged(conversationTitle,title);
  }
- private String saveCurrentMessage(String t,boolean user,String att){try{JSONArray a=readSessions();JSONObject s=ensureCurrentSession(a);s.put("updatedAt",System.currentTimeMillis()).put("time",new SimpleDateFormat("MM-dd HH:mm",Locale.getDefault()).format(new Date()));JSONObject m=new JSONObject().put("id",UUID.randomUUID().toString()).put("text",t).put("user",user).put("timestamp",System.currentTimeMillis());if(att!=null)m.put("attachment",att);s.optJSONArray("messages").put(m);persistSessions(a);refreshHistory();if(user){JSONArray messages=s.optJSONArray("messages");for(int i=0;i<messages.length();i++){JSONObject first=messages.optJSONObject(i);if(first!=null&&first.optBoolean("user")){requestTopicTitle(first.optString("text",""),s.optString("id",""));break;}}}return s.optString("id","");}catch(Exception ignored){return "";}}private void saveAssistantMessage(ReplyContext reply,String t,boolean error){if(reply.sessionId==null||reply.sessionId.isEmpty())return;try{JSONArray a=readSessions();for(int i=0;i<a.length();i++){JSONObject s=a.optJSONObject(i);if(s!=null&&reply.sessionId.equals(s.optString("id"))){if(!reply.branchId.equals(s.optString("activeBranchId")))return;s.put("updatedAt",System.currentTimeMillis());JSONArray messages=s.optJSONArray("messages");if(messages!=null)messages.put(new JSONObject().put("id",UUID.randomUUID().toString()).put("text",t).put("user",false).put("timestamp",reply.timestamp).put("modelId",reply.modelId).put("error",error).put("searchStatus",reply.searchStatus).put("sources",reply.sources.items));persistSessions(a);refreshHistory();return;}}}catch(Exception e){android.util.Log.e("Sessions","Unable to save assistant reply",e);}}
- private void resetConversation(){try{JSONArray all=readSessions();JSONObject current=ensureCurrentSession(all),inherited=SessionConfig.captureForNew(prefs,current),target=reusableEmpty(current)?current:null;all=collapseEmptySessions(all,current);if(target==null)for(int i=0;i<all.length();i++){JSONObject s=all.optJSONObject(i);if(reusableEmpty(s)){target=s;break;}}if(target==null){target=newSession();all.put(target);}target.put("config",inherited).put("updatedAt",System.currentTimeMillis()).put("time",new SimpleDateFormat("MM-dd HH:mm",Locale.getDefault()).format(new Date()));activateSession(all,target);restoreSession(target);refreshHistory();}catch(JSONException e){android.util.Log.e("Sessions","Unable to activate new session",e);}}
+ private String saveCurrentMessage(String text,boolean user,String attachment){
+  return saveCurrentMessage(text,user,attachment,new JSONArray());
+ }
+ private String saveCurrentMessage(String text,boolean user,String attachment,JSONArray descriptors){
+  try{
+   JSONObject session=ensureCurrentSession(readSessions());
+   long time=System.currentTimeMillis();
+   session.put("updatedAt",time).put("time",new SimpleDateFormat("MM-dd HH:mm",Locale.getDefault()).format(new Date(time)));
+   JSONObject message=new JSONObject().put("id",UUID.randomUUID().toString()).put("text",text).put("user",user).put("timestamp",time);
+   if(attachment!=null)message.put("attachment",attachment);
+   if(descriptors.length()>0)message.put("attachments",descriptors);
+   session.getJSONArray("messages").put(message);
+   ConversationBranches.sync(session);
+   SessionRepository repository=SessionRepository.get(prefs);
+   if(user)repository.upsertAfterSend(session);else repository.upsert(session);
+   refreshHistory();
+   if(user){
+    JSONObject first=firstUserMessage(session);
+    if(first!=null)requestTopicTitle(first.optString("text"),session.optString("id"));
+   }
+   return session.optString("id");
+  }catch(JSONException|RuntimeException invalid){
+   android.util.Log.e("Sessions","Unable to save sent message",invalid);
+   return "";
+  }
+ }
+ private void saveAssistantMessage(ReplyContext reply,String t,boolean error){if(reply.sessionId==null||reply.sessionId.isEmpty())return;try{JSONArray a=readSessions();for(int i=0;i<a.length();i++){JSONObject s=a.optJSONObject(i);if(s!=null&&reply.sessionId.equals(s.optString("id"))){if(!reply.branchId.equals(s.optString("activeBranchId")))return;s.put("updatedAt",System.currentTimeMillis());JSONArray messages=s.optJSONArray("messages");if(messages!=null)messages.put(new JSONObject().put("id",UUID.randomUUID().toString()).put("text",t).put("user",false).put("timestamp",reply.timestamp).put("modelId",reply.modelId).put("error",error).put("searchStatus",reply.searchStatus).put("sources",reply.sources.items));persistSessions(a);refreshHistory();return;}}}catch(Exception e){android.util.Log.e("Sessions","Unable to save assistant reply",e);}}
+ private void resetConversation(){persistComposerDraft();try{JSONArray all=readSessions();JSONObject current=ensureCurrentSession(all),inherited=SessionConfig.captureForNew(prefs,current),target=reusableEmpty(current)?current:null;all=collapseEmptySessions(all,current);if(target==null)for(int i=0;i<all.length();i++){JSONObject s=all.optJSONObject(i);if(reusableEmpty(s)){target=s;break;}}if(target==null){target=newSession();all.put(target);}target.put("config",inherited).put("updatedAt",System.currentTimeMillis()).put("time",new SimpleDateFormat("MM-dd HH:mm",Locale.getDefault()).format(new Date()));activateSession(all,target);restoreSession(target);refreshHistory();}catch(JSONException e){android.util.Log.e("Sessions","Unable to activate new session",e);}}
  /** Only placeholders and our persisted provisional titles may be automatically replaced. */
  static boolean canAutomaticallyTitle(JSONObject session){return session!=null&&!session.optBoolean("titleManual",false)&&!session.optBoolean("titleAutomatic",false)&&(session.optBoolean("titleFallback",false)||session.optString("title","").trim().isEmpty()||"新对话".equals(session.optString("title")));}
  private static JSONObject firstUserMessage(JSONObject session){JSONArray messages=session.optJSONArray("messages");if(messages!=null)for(int i=0;i<messages.length();i++){JSONObject m=messages.optJSONObject(i);if(m!=null&&m.optBoolean("user"))return m;}return null;}
@@ -757,7 +1385,7 @@ public class MainActivity extends AppCompatActivity {
   }
   return text.substring(0,text.offsetByCodePoints(0,Math.min(20,text.codePointCount(0,text.length()))));
  }
- @Override protected void onResume(){super.onResume();ChatGenerationService.attach(generationListener);if(generation!=null&&generation.finished)renderGeneration(generation);if(prefs!=null){refreshModelLabels();String id=prefs.getString("currentSessionId","");JSONArray all=readSessions();for(int i=0;i<all.length();i++){JSONObject s=all.optJSONObject(i);if(s!=null&&id.equals(s.optString("id"))){JSONObject first=firstUserMessage(s);if(first!=null)requestTopicTitle(first.optString("text",""),id);break;}}}resumeAttachmentWork();}
+ @Override protected void onResume(){super.onResume();ChatGenerationService.Run previous=generation;ChatGenerationService.attach(generationListener);if(previous!=null&&previous.finished&&generation==previous)renderGeneration(previous);if(prefs!=null){refreshModelLabels();String id=prefs.getString("currentSessionId","");JSONArray all=readSessions();for(int i=0;i<all.length();i++){JSONObject s=all.optJSONObject(i);if(s!=null&&id.equals(s.optString("id"))){JSONObject first=firstUserMessage(s);if(first!=null)requestTopicTitle(first.optString("text",""),id);break;}}}resumeAttachmentWork();}
  private void showConversationSettings(){
   SharedPreferences config=scoped();LinearLayout body=new LinearLayout(this);body.setOrientation(LinearLayout.VERTICAL);ThemePalette palette=ThemePalette.resolve(this);
   TextView hint=label("仅应用于本对话。新对话使用设置中的默认值。",13,muted,false);hint.setPadding(0,0,0,dp(12));body.addView(hint);
@@ -816,13 +1444,82 @@ public class MainActivity extends AppCompatActivity {
   ChoiceDialogs.multiple(this,delete?"选择要删除的对话":"选择要归档的对话",titles.toArray(new String[0]),new boolean[ids.size()],checked->{
    Set<String> chosen=new HashSet<>();for(int i=0;i<checked.length;i++)if(checked[i])chosen.add(ids.get(i));if(chosen.isEmpty())return;
    TextView hint=label((delete?"将永久删除":"将归档")+" "+chosen.size()+" 段对话。",15,ink,false);new PanelDialog(this,delete?"确认批量删除":"确认批量归档","",hint).compact().action(AlertDialog.BUTTON_NEGATIVE,"取消",null).action(AlertDialog.BUTTON_POSITIVE,"确认",()->{
-    JSONArray next=new JSONArray(),latest=readSessions();for(int i=0;i<latest.length();i++){JSONObject session=latest.optJSONObject(i);if(session==null)continue;boolean selected=chosen.contains(session.optString("id"))&&ChatGenerationService.active(session.optString("id"))==null;if(selected&&delete)continue;if(selected)try{session.put("archived",true);}catch(JSONException ignored){}next.put(session);}
-    try{if(next.length()==0)next.put(newSession());}catch(JSONException ignored){}SessionRepository.get(prefs).replace(next);if(MessageEdits.findSession(next,prefs.getString("currentSessionId",""))==null)restoreSession(next.optJSONObject(0));refreshHistory();
+    JSONArray next=new JSONArray(),latest=readSessions();
+    Set<String> removed=new HashSet<>();
+    for(int i=0;i<latest.length();i++){
+     JSONObject session=latest.optJSONObject(i);
+     if(session==null)continue;
+     String id=session.optString("id");
+     boolean selected=chosen.contains(id)&&ChatGenerationService.active(id)==null;
+     if(selected&&delete){removed.add(id);continue;}
+     if(selected)try{session.put("archived",true);}catch(JSONException invalid){android.util.Log.w("Sessions","Unable to archive "+id,invalid);}
+     next.put(session);
+    }
+    try{if(next.length()==0)next.put(newSession());}catch(JSONException ignored){}SessionRepository.get(prefs).replaceAndClear(next,removed);if(MessageEdits.findSession(next,prefs.getString("currentSessionId",""))==null)restoreSession(next.optJSONObject(0));refreshHistory();
    }).show();
   });
  }
+ private static final class MarkdownTarget {
+  final String sessionId,branchId,messageId;
+  final JSONObject snapshot;
+  MarkdownTarget(String sessionId,String branchId,String messageId,JSONObject snapshot){
+   this.sessionId=sessionId;this.branchId=branchId;this.messageId=messageId;this.snapshot=snapshot;
+  }
+  Bundle bundle(){
+   Bundle value=new Bundle();
+   value.putString("session",sessionId);
+   value.putString("branch",branchId);
+   value.putString("message",messageId);
+   return value;
+  }
+  static MarkdownTarget restore(Bundle value){
+   return new MarkdownTarget(value.getString("session",""),value.getString("branch",""),value.getString("message",""),null);
+  }
+ }
+
+ private void startMarkdownExport(String sessionId,String messageId){
+  JSONObject session=SessionRepository.get(prefs).snapshot(sessionId);
+  JSONArray messages=session==null?null:session.optJSONArray("messages");
+  if(messages==null||messages.length()==0||!messageId.isEmpty()&&MessageEdits.indexOf(messages,messageId)<0){
+   Toast.makeText(this,"没有可导出的消息。",Toast.LENGTH_SHORT).show();
+   return;
+  }
+  markdownTarget=new MarkdownTarget(sessionId,session.optString("activeBranchId"),messageId,session);
+  String title=session.optString("title","Aera 对话");
+  if(!messageId.isEmpty())title+=" - 单条消息";
+  Intent create=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+   .setType("text/markdown").putExtra(Intent.EXTRA_TITLE,ConversationMarkdown.fileName(title));
+  try{startActivityForResult(create,EXPORT_MARKDOWN);}
+  catch(ActivityNotFoundException unavailable){
+   markdownTarget=null;
+   Toast.makeText(this,"设备没有可用的文件保存器。",Toast.LENGTH_SHORT).show();
+  }
+ }
+
+ private void finishMarkdownExport(int result,@Nullable Intent data){
+  MarkdownTarget target=markdownTarget;
+  markdownTarget=null;
+  if(result!=RESULT_OK||data==null||data.getData()==null||target==null)return;
+  Uri destination=data.getData();
+  JSONObject snapshot=target.snapshot==null?SessionRepository.get(prefs).snapshot(target.sessionId):target.snapshot;
+  Context app=getApplicationContext();
+  Handler main=new Handler(Looper.getMainLooper());
+  MARKDOWN_EXPORTS.execute(()->{
+   String outcome;
+   try(OutputStream output=app.getContentResolver().openOutputStream(destination,"wt")){
+    if(output==null)throw new IOException("无法打开选定的文件。");
+    Writer writer=new BufferedWriter(new OutputStreamWriter(output,StandardCharsets.UTF_8));
+    ConversationMarkdown.write(writer,snapshot,target.branchId,target.messageId);
+    writer.flush();
+    outcome="Markdown 文件已保存。";
+   }catch(IOException|RuntimeException failure){outcome="Markdown 导出失败："+ApiFailure.local(failure);}
+   String status=outcome;
+   main.post(()->Toast.makeText(app,status,Toast.LENGTH_LONG).show());
+  });
+ }
+
  private void handleBackupResult(int request,int result,Intent data){
-  if(result!=RESULT_OK||data==null||data.getData()==null)return;Uri uri=data.getData();String snapshot=request==81?readSessions().toString():"";Toast.makeText(this,request==81?"正在导出对话和附件…":"正在读取备份…",Toast.LENGTH_SHORT).show();
+  if(result!=RESULT_OK||data==null||data.getData()==null)return;Uri uri=data.getData();List<JSONObject> snapshot=request==81?SessionRepository.get(prefs).snapshots():Collections.emptyList();Toast.makeText(this,request==81?"正在导出对话和附件…":"正在读取备份…",Toast.LENGTH_SHORT).show();
   attachmentWorker.execute(()->{try{if(request==81){int missing=ConversationBackup.exportTo(this,uri,snapshot);runOnUiThread(()->{if(!isDestroyed())Toast.makeText(this,missing==0?"备份已导出，不包含 API Key；请妥善保管对话内容":"备份已导出；有 "+missing+" 项附件原文件不可用，已保留可用的发送快照",Toast.LENGTH_LONG).show();});}
    else {JSONArray imported=ConversationBackup.importFrom(this,uri);runOnUiThread(()->{if(isDestroyed())return;TextView hint=label("读取到 "+imported.length()+" 段对话及备份中的附件。将作为独立对话添加，已有对话会保留。供应商凭据需要在本机配置。",15,ink,false);new PanelDialog(this,"导入备份","",hint).compact().action(AlertDialog.BUTTON_NEGATIVE,"取消",()->attachmentWorker.execute(()->ConversationBackup.discard(this,imported))).action(AlertDialog.BUTTON_POSITIVE,"导入",()->{JSONArray all=readSessions();for(int i=0;i<imported.length();i++)all.put(imported.optJSONObject(i));SessionRepository.get(prefs).replace(all);refreshHistory();Toast.makeText(this,"已导入 "+imported.length()+" 段对话",Toast.LENGTH_SHORT).show();}).show();});}
   }catch(Exception failure){runOnUiThread(()->{if(!isDestroyed())Toast.makeText(this,"备份操作失败："+failure.getMessage(),Toast.LENGTH_LONG).show();});}});

@@ -43,7 +43,24 @@ final class SessionConfig implements SharedPreferences {
   final Map<String,Object> changes=new HashMap<>();final SharedPreferences.Editor delegate=global.edit();
   private Editor put(String k,Object v){if(KEYS.contains(k))changes.put(k,v);else if(v==null)delegate.remove(k);else if(v instanceof Boolean)delegate.putBoolean(k,(Boolean)v);else if(v instanceof Number)delegate.putString(k,String.valueOf(v));else delegate.putString(k,String.valueOf(v));return this;}
   public Editor putString(String k,String v){return put(k,v);}public Editor putBoolean(String k,boolean v){return put(k,v);}public Editor putInt(String k,int v){return put(k,v);}public Editor putLong(String k,long v){return put(k,v);}public Editor putFloat(String k,float v){return put(k,v);}public Editor putStringSet(String k,Set<String>v){delegate.putStringSet(k,v);return this;}public Editor remove(String k){return put(k,null);}public Editor clear(){for(String k:KEYS)changes.put(k,null);return this;}
-  public void apply(){for(Map.Entry<String,Object> c:changes.entrySet())try{if(c.getValue()==null)values.remove(c.getKey());else values.put(c.getKey(),c.getValue());}catch(JSONException ignored){}try{ReasoningSelection.reconcile(values,global);}catch(JSONException ignored){}delegate.apply();if(!session.optString("id").isEmpty())SessionRepository.get(global).upsert(session);}
+  public void apply(){
+   delegate.apply();
+   if(changes.isEmpty())return;
+   String id=session.optString("id");
+   SessionRepository repository=id.isEmpty()?null:SessionRepository.get(global);
+   JSONObject target=repository==null?session:MessageEdits.findSession(repository.read(),id);
+   if(target==null)return;
+   try{
+    JSONObject settings=target.optJSONObject("config");
+    if(settings==null){settings=SessionRepository.detached(values);target.put("config",settings);}
+    for(Map.Entry<String,Object> change:changes.entrySet()){
+     if(change.getValue()==null)settings.remove(change.getKey());
+     else settings.put(change.getKey(),change.getValue());
+    }
+    ReasoningSelection.reconcile(settings,global);
+    if(repository!=null)repository.upsert(target);
+   }catch(JSONException invalid){android.util.Log.w("Sessions","Unable to save conversation settings",invalid);}
+  }
   public boolean commit(){apply();return true;}
  };}
 }

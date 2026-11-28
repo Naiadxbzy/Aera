@@ -1,0 +1,65 @@
+.reasoning-popover {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: min(320px, calc(100vw - 24px));
+  padding: 9px 11px 8px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--strong-border);
+  border-radius: 15px;
+  box-shadow: 0 12px 30px rgb(29 25 68 / .13), 0 2px 5px rgb(29 25 68 / .06);
+}
+:root[data-theme="dark"] .reasoning-popover {
+  box-shadow: 0 12px 30px rgb(0 0 0 / .33);
+}
+.reasoning-popover-head {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 32px;
+  align-items: start;
+  gap: 4px;
+}
+.reasoning-symbol, .reasoning-reset {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--muted);
+}
+.reasoning-symbol svg, .reasoning-reset svg { width: 16px; height: 16px; }
+.reasoning-reset { padding: 0; border-radius: 8px; }
+.reasoning-reset:hover:not(:disabled) { color: var(--accent); background: var(--hover); }
+.reasoning-labels { display: grid; justify-items: center; min-width: 0; padding-top: 3px; }
+.reasoning-value { color: var(--accent); font-size: 1.0625rem; line-height: 1.25; }
+.reasoning-model {
+  display: flex;
+  align-items: center;
+  max-width: 100%;
+  gap: 2px;
+  padding: 3px 5px;
+  color: var(--muted);
+  font-size: .85rem;
+  line-height: 1.3;
+  border-radius: 6px;
+  text-align: center;
+}
+.reasoning-model span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reasoning-model svg { width: 12px; height: 12px; }
+.reasoning-model:hover { color: var(--accent); background: var(--tint); }
+.reasoning-rail { position: relative; direction: ltr; height: 43px; margin-top: 3px; }
+.reasoning-rail canvas { display: block; width: 100%; height: 100%; transition: opacity 180ms cubic-bezier(.23, 1, .32, 1); }
+.reasoning-rail.is-auto canvas { opacity: .55; }
+.reasoning-rail input {
+  position: absolute;
+  inset: 0 auto 0 var(--input-offset, 0px);
+  appearance: none;
+  width: calc(100% - var(--input-offset, 0px));
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+.reasoning-rail input::-webkit-slider-thumb { appearance: none; width: 36px; height: 36px; }
+.reasoning-rail input::-moz-range-thumb { width: 36px; height: 36px; border: 0; }
+.reasoning-fixed { margin: 8px 0 2px; color: var(--muted); font-size: .8125rem; text-align: center; }

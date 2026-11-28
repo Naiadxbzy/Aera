@@ -1,4 +1,8 @@
-# Add project specific R8 rules here.
+# Shizuku starts this user service by its component class name in another process.
+-keep class com.changyu.ochat.ShizukuPowerService {
+    public <init>();
+    public <init>(android.content.Context);
+}
 # AGP will combine all keep rule files in src/main/keepRules to pass to R8
 #
 # For more details, see

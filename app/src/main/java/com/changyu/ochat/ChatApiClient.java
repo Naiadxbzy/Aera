@@ -2,7 +2,6 @@ package com.changyu.ochat;
 
 import org.json.*;
 import java.io.*;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import okhttp3.*;
@@ -26,60 +25,205 @@ public class ChatApiClient {
  public void chat(String b,String k,String m,JSONArray h,double t,int max,double top,String e,String protocol,SearchOptions search,CallbackResult<String> cb){try{DeepSeekInputPolicy.validate(b,m,protocol,h);JSONObject body=requestBody(m,h,t,max,top,e,protocol,search);if(!GEMINI.equals(protocol))body.put("stream",false);if(ANTHROPIC.equals(protocol)){new AnthropicToolRequest(this,b,k,body,search).chat(cb);return;}request("POST",NativeProtocols.nativeProtocol(protocol)?NativeProtocols.endpoint(b,protocol,m,false):endpoint(b,protocol),k,protocol,body,new CallbackResult<JSONObject>(){public void onSuccess(JSONObject x){try{NativeToolState tools=new NativeToolState();tools.complete(protocol,x,NativeToolState.callback(cb));String text;try{text=NativeProtocols.nativeProtocol(protocol)?NativeProtocols.text(x,protocol):ChatResponseParser.parse(x,false);}catch(Exception empty){if(tools.fallback().isEmpty())throw empty;text=tools.fallback();}if(search.grounded()){if(RESPONSES.equals(protocol)){ResponseStream state=new ResponseStream();state.inspectSearch(x);cb.onSearchSources(SearchSources.fromResponse(x),state.searchCalled?state.searchStatus:"本次未调用内置搜索");}else cb.onSearchSources(tools.sources,tools.searchStatus.isEmpty()?(tools.sources.items.length()>0?"已收到模型引用来源":"本次未调用搜索或网页读取"):tools.searchStatus);}cb.onSuccess(text);}catch(Exception z){cb.onError(ApiFailure.safe("无法解析模型回复："+ApiFailure.local(z),k));}}public void onError(String x){cb.onError(x);}});}catch(Exception x){cb.onError(ApiFailure.safe("请求构建失败："+ApiFailure.local(x)+"\n模型："+m+" · 协议："+protocol,k));}}
  public void streamChat(String b,String k,String m,JSONArray h,double t,int max,double top,String e,StreamCallback cb){streamChat(b,k,m,h,t,max,top,e,CHAT_COMPLETIONS,cb);}
  public void streamChat(String b,String k,String m,JSONArray h,double t,int max,double top,String e,String protocol,StreamCallback cb){streamChat(b,k,m,h,t,max,top,e,protocol,SearchOptions.OFF,cb);}
- public void streamChat(String b,String k,String m,JSONArray h,double t,int max,double top,String e,String protocol,SearchOptions search,StreamCallback cb){try{DeepSeekInputPolicy.validate(b,m,protocol,h);JSONObject body=requestBody(m,h,t,max,top,e,protocol,search);if(!GEMINI.equals(protocol))body.put("stream",true);if(CHAT_COMPLETIONS.equals(protocol))body.put("stream_options",new JSONObject().put("include_usage",true));if(ANTHROPIC.equals(protocol)){new AnthropicToolRequest(this,b,k,body,search).stream(cb);return;}Request.Builder q=new Request.Builder().url(NativeProtocols.nativeProtocol(protocol)?NativeProtocols.endpoint(b,protocol,m,true):endpoint(b,protocol)).header("Accept","text/event-stream");NativeProtocols.auth(q,k,protocol);enqueue(q.post(JsonRequestBody.create(body,JSON)).build(),new Callback(){public void onFailure(Call c,IOException x){if(!cancelled())cb.onError(ApiFailure.safe("网络请求失败："+ApiFailure.local(x)+"\n"+ApiFailure.settings(protocol,body),k));}public void onResponse(Call c,Response r){try(Response z=r){if(!z.isSuccessful()){cb.onError(ApiFailure.http(z,protocol,body,k));return;}if(z.body()==null){cb.onError("接口没有返回内容");return;}String type=z.header("Content-Type","");if(type!=null&&type.contains("application/json")){JSONObject errorBody=new JSONObject(z.body().string());if(errorBody.has("error"))throw new IOException(ApiFailure.provider(errorBody));throw new IOException("invalid_stream：已请求流式回复，但接口返回 application/json。请检查供应商流式支持和接口协议。");}parseSse(z.body().byteStream(),protocol,cb);}catch(Exception x){if(!cancelled()){String detail=ApiFailure.safe(ApiFailure.local(x)+"\n本次请求："+ApiFailure.settings(protocol,body),k);cb.onError(detail);}}}});}catch(Exception x){cb.onError(ApiFailure.safe("请求构建失败："+ApiFailure.local(x)+"\n模型："+m+" · 协议："+protocol,k));}}
- JSONObject parseSse(InputStream input,String protocol,StreamCallback cb)throws Exception {
-  BufferedReader reader=new BufferedReader(new InputStreamReader(input,StandardCharsets.UTF_8));
-  String line,event="",reason="";StringBuilder data=new StringBuilder(),chatText=new StringBuilder();ResponseStream state=new ResponseStream();NativeToolState nativeTools=new NativeToolState();
-  ReasoningText.Tags tagged=new ReasoningText.Tags(text->{chatText.append(text);cb.onDelta(text);},cb::onReasoning);JSONObject usage=new JSONObject();boolean eof=false,terminal=false;
-  while(!cancelled()&&!eof){
-   line=reader.readLine();if(line==null){eof=true;line="";}
-   if(!line.isEmpty()){if(line.startsWith("event:"))event=line.substring(6).trim();else if(line.startsWith("data:")){if(data.length()>0)data.append('\n');String value=line.substring(5);data.append(value.startsWith(" ")?value.substring(1):value);}continue;}
-   if(data.length()==0)continue;String raw=data.toString();data.setLength(0);
-   if("[DONE]".equals(raw.trim())){terminal=true;if(reason.isEmpty())reason="stop";break;}
-   JSONObject o;try{o=new JSONObject(raw);}catch(JSONException malformed){throw new IOException("invalid_sse：流事件不是有效 JSON");}
-   String type=o.optString("type",event);event="";
-   if(o.has("error")&&!o.isNull("error"))throw new IOException(ApiFailure.provider(o));
-   nativeTools.observe(protocol,type,o,cb);
+ public void streamChat(String base,String key,String model,JSONArray history,double t,int max,double top,String effort,String protocol,SearchOptions search,StreamCallback callback){
+  try{
+   DeepSeekInputPolicy.validate(base,model,protocol,history);
+   JSONObject body=requestBody(model,history,t,max,top,effort,protocol,search);
+   if(!GEMINI.equals(protocol))body.put("stream",true);
+   if(CHAT_COMPLETIONS.equals(protocol))body.put("stream_options",new JSONObject().put("include_usage",true));
+   if(ANTHROPIC.equals(protocol)){
+    new AnthropicToolRequest(this,base,key,body,search).stream(callback);
+    return;
+   }
+   String url=NativeProtocols.nativeProtocol(protocol)?NativeProtocols.endpoint(base,protocol,model,true):endpoint(base,protocol);
+   streamRequest(url,key,protocol,body,callback);
+  }catch(Exception error){
+   callback.onError(ApiFailure.safe("请求构建失败："+ApiFailure.local(error)+"\n模型："+model+" · 协议："+protocol,key));
+  }
+ }
+
+ private void streamRequest(String url,String key,String protocol,JSONObject body,StreamCallback callback){
+  Request.Builder request=new Request.Builder().url(url).header("Accept","text/event-stream");
+  NativeProtocols.auth(request,key,protocol);
+  enqueue(request.post(JsonRequestBody.create(body,JSON)).build(),new Callback(){
+   public void onFailure(Call call,IOException failure){
+    if(!cancelled())callback.onError(ApiFailure.safe("网络请求失败："+ApiFailure.local(failure)+"\n"+ApiFailure.settings(protocol,body),key));
+   }
+   public void onResponse(Call call,Response response){
+    boolean retry=false;
+    try(Response result=response){
+     if(!result.isSuccessful()){
+      String detail=ApiFailure.http(result,protocol,body,key);
+      retry=body.has("stream_options")&&ApiFailure.rejectsStreamUsage(result.code(),detail);
+      if(!retry)callback.onError(detail);
+     }else{
+      if(result.body()==null)throw new IOException("接口没有返回内容");
+      if(result.headers().get("Content-Type")!=null&&result.header("Content-Type").toLowerCase(Locale.ROOT).contains("application/json")){
+       JSONObject value=readJson(result);
+       if(ApiFailure.isProviderError(value,value.optString("type")))throw new IOException(ApiFailure.provider(value));
+       throw new IOException("invalid_stream：已请求流式回复，但接口返回普通 JSON，请检查供应商的流式支持和接口协议。");
+      }
+      parseSse(result.body().byteStream(),protocol,callback);
+     }
+    }catch(Exception error){
+     if(!cancelled())callback.onError(ApiFailure.safe(ApiFailure.local(error)+"\n本次请求："+ApiFailure.settings(protocol,body),key));
+     return;
+    }
+    if(retry&&!cancelled()){
+     body.remove("stream_options");
+     streamRequest(url,key,protocol,body,callback);
+    }
+   }
+  });
+ }
+
+ static JSONObject readJson(Response response)throws IOException{
+  ResponseBody body=response.body();
+  if(body==null)throw new IOException("接口没有返回内容");
+  long limit=8L*1024*1024;
+  if(body.contentLength()>limit||body.source().request(limit+1)){
+   throw new IOException("response_limit：接口响应超过 8 MiB。");
+  }
+  try{return new JSONObject(body.string());}
+  catch(JSONException invalid){
+   throw new IOException("invalid_json：服务端返回的不是有效 JSON，请核对接口协议和 API 路径（HTTP "+response.code()+"，Content-Type: "+response.header("Content-Type","未提供")+"）");
+  }
+ }
+
+ private static final class TextLimit {
+  private final java.util.function.Consumer<String> sink;
+  private boolean received;
+  private int length;
+  TextLimit(java.util.function.Consumer<String> sink){this.sink=sink;}
+  void append(String text){
+   if(text.isEmpty())return;
+   if(length+text.length()>SseReader.MAX_TEXT){
+    throw new IllegalArgumentException("response_limit：回复超过本机可显示的大小，已保留收到的内容。");
+   }
+   length+=text.length();
+   received=true;
+   sink.accept(text);
+  }
+ }
+
+ JSONObject parseSse(InputStream input,String protocol,StreamCallback cb)throws Exception{
+  SseReader reader=new SseReader(input);
+  String reason="";
+  ResponseStream state=new ResponseStream();
+  NativeToolState nativeTools=new NativeToolState();
+  TextLimit answer=new TextLimit(cb::onDelta),thinking=new TextLimit(cb::onReasoning);
+  ReasoningText.Tags tagged=new ReasoningText.Tags(answer::append,thinking::append);
+  JSONObject usage=new JSONObject();
+  boolean terminal=false;
+  String searchStatus="";
+  int sourceRevision=-1;
+  while(!cancelled()){
+   SseReader.Event frame=reader.next();
+   if(frame==null)break;
+   if(frame.data==null){
+    terminal=true;
+    if(reason.isEmpty())reason="stop";
+    break;
+   }
+   JSONObject value=frame.data;
+   String type=value.optString("type",frame.type);
+   if(ApiFailure.isProviderError(value,type))throw new IOException(ApiFailure.provider(value));
+   nativeTools.observe(protocol,type,value,cb);
    if(RESPONSES.equals(protocol)){
-    String beforeReasoning=state.reasoning();
-    try{state.accept(type,o);}catch(IOException failure){if(failure.getMessage()!=null&&failure.getMessage().startsWith("refusal")){cb.onSnapshot(state.text());cb.onFinished(GenerationResult.of("refusal",usage));return null;}throw failure;}String afterReasoning=state.reasoning();if(!afterReasoning.equals(beforeReasoning)){if(afterReasoning.startsWith(beforeReasoning))cb.onReasoning(afterReasoning.substring(beforeReasoning.length()));cb.onReasoningSnapshot(afterReasoning);}cb.onSnapshot(state.text());cb.onSearchSources(state.sources,state.searchCalled?state.searchStatus:("response.completed".equals(type)?"本次未调用内置搜索":""));
-    JSONObject response=o.optJSONObject("response");if(response!=null){GenerationResult.merge(usage,GenerationResult.usage(response.optJSONObject("usage")));}
-    if(type.equals("response.completed")||type.equals("response.incomplete")){
-     terminal=true;JSONObject detail=response==null?null:response.optJSONObject("incomplete_details");
-     reason=type.equals("response.completed")?"stop":detail==null?"max_output_tokens":detail.optString("reason","max_output_tokens");break;
+    try{state.accept(type,value);}
+    catch(IOException failure){
+     if(failure.getMessage()!=null&&failure.getMessage().startsWith("refusal")){
+      cb.onSnapshot(state.text());
+      cb.onFinished(GenerationResult.of("refusal",usage));
+      return null;
+     }
+     throw failure;
+    }
+    if(state.answerReplaced)cb.onSnapshot(state.text());
+    else if(!state.answerDelta.isEmpty())cb.onDelta(state.answerDelta);
+    if(state.thoughtReplaced)cb.onReasoningSnapshot(state.reasoning());
+    else if(!state.thoughtDelta.isEmpty())cb.onReasoning(state.thoughtDelta);
+    terminal=type.equals("response.completed")||type.equals("response.incomplete");
+    String status=state.searchCalled?state.searchStatus:terminal?"本次未调用内置搜索":"";
+    if(sourceRevision!=state.sources.revision()||!status.equals(searchStatus)){
+     sourceRevision=state.sources.revision();searchStatus=status;
+     cb.onSearchSources(state.sources,status);
+    }
+    JSONObject response=value.optJSONObject("response");
+    if(response!=null)GenerationResult.merge(usage,GenerationResult.usage(response.optJSONObject("usage")));
+    if(terminal){
+     JSONObject detail=response==null?null:response.optJSONObject("incomplete_details");
+     reason=type.equals("response.completed")?"stop":detail==null?"max_output_tokens":detail.optString("reason","max_output_tokens");
+     break;
     }
    }else if(ANTHROPIC.equals(protocol)){
-    JSONObject message=o.optJSONObject("message");if(message!=null)GenerationResult.merge(usage,GenerationResult.usage(message.optJSONObject("usage")));
-    GenerationResult.merge(usage,GenerationResult.usage(o.optJSONObject("usage")));
-    JSONObject delta=o.optJSONObject("delta");
-    JSONObject initial=o.optJSONObject("content_block");if(type.equals("content_block_start")&&initial!=null&&"thinking".equals(initial.optString("type")))cb.onReasoning(initial.optString("thinking"));
-    if(type.equals("content_block_start")&&initial!=null&&"text".equals(initial.optString("type"))){String text=initial.optString("text");chatText.append(text);if(!text.isEmpty())cb.onDelta(text);}
-    if(type.equals("content_block_delta")&&delta!=null){String text=delta.optString("text");if(!text.isEmpty()){chatText.append(text);cb.onDelta(text);}if(delta.has("thinking"))cb.onReasoning(delta.optString("thinking"));}
+    JSONObject message=value.optJSONObject("message");
+    if(message!=null)GenerationResult.merge(usage,GenerationResult.usage(message.optJSONObject("usage")));
+    GenerationResult.merge(usage,GenerationResult.usage(value.optJSONObject("usage")));
+    JSONObject delta=value.optJSONObject("delta"),initial=value.optJSONObject("content_block");
+    if(type.equals("content_block_start")&&initial!=null){
+     if("thinking".equals(initial.optString("type")))thinking.append(initial.optString("thinking"));
+     if("text".equals(initial.optString("type")))answer.append(initial.optString("text"));
+    }
+    if(type.equals("content_block_delta")&&delta!=null){
+     answer.append(delta.optString("text"));
+     thinking.append(delta.optString("thinking"));
+    }
     if(type.equals("message_delta")&&delta!=null)reason=delta.optString("stop_reason",reason);
     if(type.equals("message_stop")){terminal=true;break;}
    }else if(GEMINI.equals(protocol)){
-    GenerationResult.merge(usage,GenerationResult.usage(o.optJSONObject("usageMetadata")));
-    JSONArray candidates=o.optJSONArray("candidates");JSONObject first=candidates==null?null:candidates.optJSONObject(0);
-    JSONObject feedback=o.optJSONObject("promptFeedback");if(feedback!=null&&feedback.has("blockReason")){reason="blocked";terminal=true;break;}
-    if(first!=null){JSONObject content=first.optJSONObject("content");JSONArray parts=content==null?null:content.optJSONArray("parts");
-     if(parts!=null)for(int i=0;i<parts.length();i++){JSONObject p=parts.optJSONObject(i);if(p==null)continue;String text=p.optString("text");if(p.optBoolean("thought"))cb.onReasoning(text);else{chatText.append(text);cb.onDelta(text);}}
-     if(first.has("finishReason")){reason=first.optString("finishReason");terminal=true;}
+    GenerationResult.merge(usage,GenerationResult.usage(value.optJSONObject("usageMetadata")));
+    JSONArray candidates=value.optJSONArray("candidates");
+    JSONObject first=candidates==null?null:candidates.optJSONObject(0),feedback=value.optJSONObject("promptFeedback");
+    if(feedback!=null&&!feedback.optString("blockReason").isEmpty()){
+     reason="blocked";terminal=true;break;
+    }
+    if(first!=null){
+     JSONObject content=first.optJSONObject("content");
+     JSONArray parts=content==null?null:content.optJSONArray("parts");
+     for(int i=0;parts!=null&&i<parts.length();i++){
+      JSONObject part=parts.optJSONObject(i);
+      if(part!=null)(part.optBoolean("thought")?thinking:answer).append(part.optString("text"));
+     }
+     if(!first.isNull("finishReason")&&!first.optString("finishReason").isEmpty()){
+      reason=first.optString("finishReason");terminal=true;
+     }
     }
    }else{
-    GenerationResult.merge(usage,GenerationResult.usage(o.optJSONObject("usage")));
-    JSONArray choices=o.optJSONArray("choices");JSONObject choice=choices==null?null:choices.optJSONObject(0),delta=choice==null?null:choice.optJSONObject("delta");
-    if(delta!=null){if(ChatResponseParser.hasRefusal(delta)){reason="refusal";terminal=true;String refusal=ChatResponseParser.text(delta.opt("refusal"));if(!refusal.isEmpty()){chatText.append(refusal);cb.onDelta(refusal);}}String rs=ReasoningText.delta(delta);if(!rs.isEmpty())cb.onReasoning(rs);String text=ChatResponseParser.text(delta.opt("content"));if(!text.isEmpty())tagged.append(text);}
-    if(choice!=null&&!choice.isNull("finish_reason")&&!choice.optString("finish_reason").isEmpty()){if(!"refusal".equals(reason))reason=choice.optString("finish_reason");terminal=true;}
+    GenerationResult.merge(usage,GenerationResult.usage(value.optJSONObject("usage")));
+    JSONArray choices=value.optJSONArray("choices");
+    JSONObject choice=choices==null?null:choices.optJSONObject(0),delta=choice==null?null:choice.optJSONObject("delta");
+    if(delta!=null){
+     if(ChatResponseParser.hasRefusal(delta)){
+      reason="refusal";terminal=true;
+      answer.append(ChatResponseParser.text(delta.opt("refusal")));
+     }
+     thinking.append(ReasoningText.delta(delta));
+     tagged.append(ChatResponseParser.text(delta.opt("content")));
+    }
+    if(choice!=null&&!choice.isNull("finish_reason")&&!choice.optString("finish_reason").isEmpty()){
+     if(!"refusal".equals(reason))reason=choice.optString("finish_reason");
+     terminal=true;
+    }
    }
   }
   if(cancelled())return null;
   if(ANTHROPIC.equals(protocol)&&terminal&&"pause_turn".equals(reason))return nativeTools.paused(usage);
   if(CHAT_COMPLETIONS.equals(protocol))tagged.finish();
-  String text=RESPONSES.equals(protocol)?state.text():chatText.toString();
-  if(text.isEmpty()&&!nativeTools.fallback().isEmpty()){text=nativeTools.fallback();if(RESPONSES.equals(protocol))cb.onSnapshot(text);else cb.onDelta(text);}
-  if(text.isEmpty()&&!terminal)throw new IOException("empty_stream：连接已结束，但未收到有效答案或结束事件。请检查接口是否支持当前协议的 SSE 流式回复。");
-  if(text.isEmpty()&&(reason.equals("stop")||reason.equals("end_turn")||reason.equals("STOP")))cb.onError("no_text：模型返回了空内容");
-  else cb.onFinished(GenerationResult.of(terminal?reason:"interrupted",usage));
+  boolean hasText=answer.received||state.hasText(),hasThought=thinking.received||state.hasReasoning();
+  if(!hasText&&!nativeTools.fallback().isEmpty()){
+   answer.append(nativeTools.fallback());
+   hasText=true;
+  }
+  if(!hasText&&!hasThought){
+   if(!terminal)throw new IOException("empty_stream：连接已结束，但未收到有效答案或结束事件。请检查接口的 SSE 支持。");
+   if("stop".equalsIgnoreCase(reason)||"end_turn".equals(reason)){
+    cb.onError("no_text：模型返回了空内容");
+    return null;
+   }
+  }
+  if(RESPONSES.equals(protocol)&&state.hasText())cb.onSnapshot(state.text());
+  cb.onFinished(terminal?GenerationResult.of(reason,usage):new GenerationResult("interrupted","流连接在结束事件前关闭。",usage));
   return null;
  }
  static String searchError(int code){return "web_search_error："+(code>0?"接口错误（"+code+"）":"请求未完成")+"。请检查供应商 / 模型是否支持 Responses 的 web_search 工具及工具权限、计费；可在设置 → 联网搜索选择 Tavily。不自动重发或退回无搜索。";}
@@ -142,10 +286,10 @@ public class ChatApiClient {
   });}catch(Exception e){cb.onError("API 地址或请求参数无效："+readable(e.getMessage()));}
  }
  private void request(String method,String url,String key,JSONObject json,CallbackResult<JSONObject> cb){request(method,url,key,CHAT_COMPLETIONS,json,cb);}
- private void request(String method,String url,String key,String protocol,JSONObject json,CallbackResult<JSONObject> cb){Request.Builder b=new Request.Builder().url(url).header("Accept","application/json");NativeProtocols.auth(b,key,protocol);if("POST".equals(method))b.post(JsonRequestBody.create(json,JSON));else b.get();enqueue(b.build(),new Callback(){public void onFailure(Call c,IOException e){cb.onError(ApiFailure.safe("网络请求失败："+ApiFailure.local(e),key));}public void onResponse(Call c,Response r){try(Response x=r){if(!x.isSuccessful()){cb.onError(ApiFailure.http(x,protocol,json,key));return;}String raw=x.body()==null?"":x.body().string();JSONObject o;try{o=new JSONObject(raw);}catch(Exception e){throw new IOException("invalid_json：服务端返回的不是有效 JSON，请核对接口协议和 API 路径（HTTP "+x.code()+"，Content-Type: "+x.header("Content-Type","未提供")+"）");}if(o.has("error")&&!o.isNull("error")){cb.onError(ApiFailure.safe(ApiFailure.provider(o),key));return;}cb.onSuccess(o);}catch(Exception e){cb.onError(ApiFailure.safe(ApiFailure.local(e),key));}}});}
+ private void request(String method,String url,String key,String protocol,JSONObject json,CallbackResult<JSONObject> cb){Request.Builder b=new Request.Builder().url(url).header("Accept","application/json");NativeProtocols.auth(b,key,protocol);if("POST".equals(method))b.post(JsonRequestBody.create(json,JSON));else b.get();enqueue(b.build(),new Callback(){public void onFailure(Call c,IOException e){cb.onError(ApiFailure.safe("网络请求失败："+ApiFailure.local(e),key));}public void onResponse(Call c,Response r){try(Response x=r){if(!x.isSuccessful()){cb.onError(ApiFailure.http(x,protocol,json,key));return;}JSONObject o=readJson(x);if(ApiFailure.isProviderError(o,o.optString("type"))){cb.onError(ApiFailure.safe(ApiFailure.provider(o),key));return;}cb.onSuccess(o);}catch(Exception e){cb.onError(ApiFailure.safe(ApiFailure.local(e),key));}}});}
  private static void auth(Request.Builder b,String k){if(k!=null&&!k.trim().isEmpty())b.header("Authorization","Bearer "+k.trim());}
  static String endpoint(String base,String suffix){String b=base==null?"":base.trim();while(b.endsWith("/"))b=b.substring(0,b.length()-1);if(!(b.startsWith("http://")||b.startsWith("https://")))throw new IllegalArgumentException("API 地址必须以 http:// 或 https:// 开头");for(String x:new String[]{"/chat/completions","/responses"})if(b.endsWith(x))b=b.substring(0,b.length()-x.length());if("models".equals(suffix))return b+"/models";return b+(RESPONSES.equals(suffix)?"/responses":"/chat/completions");}
  private static String readable(String s){return s==null||s.trim().isEmpty()?"未知网络错误":s;}
  public void tavily(String k,String q,int count,String depth,CallbackResult<String> cb){tavilySources(k,q,count,depth,new CallbackResult<SearchSources>(){public void onSuccess(SearchSources s){cb.onSuccess(s.grounding());}public void onError(String error){cb.onError(error);}});}
- public void tavilySources(String k,String q,int count,String depth,CallbackResult<SearchSources> cb){if(k==null||k.trim().isEmpty()){cb.onError("请在设置 → 联网搜索中填写 Tavily API Key");return;}if(count<1||count>20||!("basic".equals(depth)||"advanced".equals(depth))){cb.onError("搜索参数无效：数量应为 1–20，深度为 basic/advanced");return;}try{JSONObject body=new JSONObject().put("api_key",k).put("query",q).put("max_results",count).put("search_depth",depth);request("POST","https://api.tavily.com/search",null,body,new CallbackResult<JSONObject>(){public void onSuccess(JSONObject v){if(v.has("error")){cb.onError("搜索服务返回错误，请检查配置");return;}cb.onSuccess(SearchSources.parse(v.optJSONArray("results")));}public void onError(String x){cb.onError(x);}});}catch(Exception e){cb.onError("搜索请求无效，请检查配置");}}
+ public void tavilySources(String k,String q,int count,String depth,CallbackResult<SearchSources> cb){if(k==null||k.trim().isEmpty()){cb.onError("请在设置 → 联网搜索中填写 Tavily API Key");return;}if(count<1||count>20||!("basic".equals(depth)||"advanced".equals(depth))){cb.onError("搜索参数无效：数量应为 1–20，深度为 basic/advanced");return;}try{JSONObject body=new JSONObject().put("api_key",k).put("query",q).put("max_results",count).put("search_depth",depth);request("POST","https://api.tavily.com/search",null,body,new CallbackResult<JSONObject>(){public void onSuccess(JSONObject v){if(v.has("error")){cb.onError("搜索服务返回错误，请检查配置");return;}cb.onSuccess(SearchSources.parse(v.optJSONArray("results")));}public void onError(String x){cb.onError(ApiFailure.safe(x,k));}});}catch(Exception e){cb.onError("搜索请求无效，请检查配置");}}
 }

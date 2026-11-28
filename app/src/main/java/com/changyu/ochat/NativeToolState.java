@@ -8,26 +8,31 @@ import java.util.*;
 final class NativeToolState {
  final SearchSources sources=new SearchSources();String searchStatus="",container="";boolean searchCalled;
  private final TreeMap<Integer,JSONObject> blocks=new TreeMap<>();
+ private final Map<Integer,Map<String,StringBuilder>> streamedFields=new HashMap<>();
  private final Map<Integer,StringBuilder> inputs=new HashMap<>();private final Set<String> events=new HashSet<>();
  private final StringBuilder fallback=new StringBuilder();
  void observe(String protocol,String type,JSONObject value,ChatApiClient.StreamCallback callback)throws Exception{
-  sources.collect(value);
+  if(!ChatApiClient.RESPONSES.equals(protocol))sources.collect(value);
   if(ChatApiClient.ANTHROPIC.equals(protocol)){
    JSONObject message=value.optJSONObject("message"),delta=value.optJSONObject("delta");
    rememberContainer(value);if(message!=null)rememberContainer(message);if(delta!=null)rememberContainer(delta);
    if(type.equals("content_block_start")){
     int index=value.optInt("index");JSONObject block=value.optJSONObject("content_block");
-    if(block!=null){blocks.put(index,block);inspectBlock(block,callback,false);}
+    if(block!=null){if(blocks.size()>=256&&!blocks.containsKey(index))throw SseReader.malformed("工具内容块过多");blocks.put(index,block);inspectBlock(block,callback,false);}
    }else if(type.equals("content_block_delta")){
     int index=value.optInt("index");JSONObject block=blocks.get(index);
     if(block!=null&&delta!=null){
-     for(String key:new String[]{"text","thinking","signature"})if(delta.has(key))block.put(key,block.optString(key)+delta.optString(key));
-     if(delta.has("partial_json"))inputs.computeIfAbsent(index,k->new StringBuilder()).append(delta.optString("partial_json"));
+     for(String key:new String[]{"text","thinking","signature"})if(delta.has(key)){
+      Map<String,StringBuilder> fields=streamedFields.computeIfAbsent(index,ignored->new HashMap<>());
+      StringBuilder target=fields.computeIfAbsent(key,ignored->new StringBuilder(block.optString(key)));
+      appendBounded(target,delta.optString(key));
+     }
+     if(delta.has("partial_json"))appendBounded(inputs.computeIfAbsent(index,k->new StringBuilder()),delta.optString("partial_json"));
      JSONObject citation=delta.optJSONObject("citation");if(citation!=null){JSONArray citations=block.optJSONArray("citations");if(citations==null){citations=new JSONArray();block.put("citations",citations);}citations.put(citation);}
     }
    }else if(type.equals("content_block_stop")){
     int index=value.optInt("index");JSONObject block=blocks.get(index);StringBuilder input=inputs.remove(index);
-    if(block!=null){if(input!=null&&input.length()>0)block.put("input",new JSONObject(input.toString()));inspectBlock(block,callback,true);}
+    if(block!=null){applyFields(index,block);if(input!=null&&input.length()>0)block.put("input",new JSONObject(input.toString()));inspectBlock(block,callback,true);}
    }
   }else if(ChatApiClient.GEMINI.equals(protocol)){
    JSONArray candidates=value.optJSONArray("candidates");JSONObject first=candidates==null?null:candidates.optJSONObject(0);
@@ -39,7 +44,7 @@ final class NativeToolState {
     for(int i=0;parts!=null&&i<parts.length();i++){
      JSONObject part=parts.optJSONObject(i);if(part==null)continue;JSONObject code=part.optJSONObject("executableCode"),result=part.optJSONObject("codeExecutionResult");
      if(code!=null){callback.onStatus("正在执行代码…");record("code_execution","running",code.optString("code"),"",callback);}
-     if(result!=null){boolean ok=result.optString("outcome").equals("OUTCOME_OK");String output=result.optString("output");callback.onStatus(ok?"代码执行完成":"代码执行返回错误");boolean fresh=record("code_execution",ok?"completed":"failed","",output,callback);if(fresh&&!output.isEmpty())fallback.append(ok?"":"执行错误：\n").append(output).append('\n');}
+     if(result!=null){boolean ok=result.optString("outcome").equals("OUTCOME_OK");String output=result.optString("output");callback.onStatus(ok?"代码执行完成":"代码执行返回错误");boolean fresh=record("code_execution",ok?"completed":"failed","",output,callback);if(fresh&&!output.isEmpty())appendBounded(fallback,(ok?"":"执行错误：\n")+output+'\n');}
     }
    }
   }else if(ChatApiClient.RESPONSES.equals(protocol)){
@@ -61,7 +66,7 @@ final class NativeToolState {
  }
  private void inspectCodeItem(JSONObject item,ChatApiClient.StreamCallback callback)throws Exception{
   StringBuilder output=new StringBuilder();JSONArray values=item.optJSONArray("outputs");for(int i=0;values!=null&&i<values.length();i++){JSONObject value=values.optJSONObject(i);if(value!=null&&value.optString("type").equals("logs"))output.append(value.optString("logs")).append('\n');}
-  if(record("code_interpreter",item.optString("status","completed"),item.optString("code"),output.toString(),callback)&&output.length()>0)fallback.append(output);
+  if(record("code_interpreter",item.optString("status","completed"),item.optString("code"),output.toString(),callback)&&output.length()>0)appendBounded(fallback,output.toString());
  }
  private void inspectBlock(JSONObject block,ChatApiClient.StreamCallback callback,boolean ended)throws Exception{
   String type=block.optString("type"),name=block.optString("name");
@@ -74,12 +79,23 @@ final class NativeToolState {
    String tool=type.startsWith("web_search")?"web_search":type.startsWith("web_fetch")?"web_fetch":"code_execution";
    String output=result==null?"":result.optString("stdout")+result.optString("stderr");if(result!=null&&output.isEmpty())output=result.optString("error_code");
    if(tool.equals("web_search")||tool.equals("web_fetch")){searchCalled=true;searchStatus=failed?"内置工具返回错误"+(output.isEmpty()?"":" · "+output):tool.equals("web_search")?"内置搜索完成":"网页读取完成";}
-   if(record(tool,failed?"failed":"completed","",output,callback)&&tool.equals("code_execution")&&!output.isEmpty())fallback.append(failed?"执行错误：\n":"").append(output).append('\n');
+   if(record(tool,failed?"failed":"completed","",output,callback)&&tool.equals("code_execution")&&!output.isEmpty())appendBounded(fallback,(failed?"执行错误：\n":"")+output+'\n');
    sources.collect(block);
   }
  }
+ private static void appendBounded(StringBuilder target,String value)throws IOException{
+  if(target.length()+value.length()>SseReader.MAX_TEXT)throw new IOException("response_limit：工具输出超过本机可显示的大小。");
+  target.append(value);
+ }
+
+ private void applyFields(int index,JSONObject block)throws JSONException{
+  Map<String,StringBuilder> fields=streamedFields.remove(index);
+  if(fields==null)return;
+  for(Map.Entry<String,StringBuilder> field:fields.entrySet())block.put(field.getKey(),field.getValue().toString());
+ }
+
  private boolean record(String tool,String status,String input,String output,ChatApiClient.StreamCallback callback)throws JSONException{
-  String signature=tool+'\u0000'+status+'\u0000'+input+'\u0000'+output;if(!events.add(signature))return false;
+  String signature=tool+'\u0000'+status+'\u0000'+preview(input)+'\u0000'+preview(output);if(events.size()>=256||!events.add(signature))return false;
   callback.onToolEvent(new JSONObject().put("tool",tool).put("status",status).put("input",preview(input)).put("output",preview(output)));return true;
  }
  private static String preview(String value){return value.length()>4000?value.substring(0,4000)+"\n… 工具记录已截取":value;}
@@ -87,7 +103,7 @@ final class NativeToolState {
  void publish(ChatApiClient.StreamCallback callback){if(searchCalled||sources.items.length()>0)callback.onSearchSources(sources,searchStatus);}
  String fallback(){return fallback.toString().trim();}
  JSONObject paused(JSONObject usage)throws Exception{
-  JSONArray content=new JSONArray();for(JSONObject block:blocks.values()){if(block.optString("type").equals("tool_use")||block.optString("type").equals("mcp_tool_use"))throw new IOException("接口要求客户端工具执行，但本次仅启用了服务端内置工具。");content.put(block);}
+  JSONArray content=new JSONArray();for(Map.Entry<Integer,JSONObject> entry:blocks.entrySet()){JSONObject block=entry.getValue();applyFields(entry.getKey(),block);if(block.optString("type").equals("tool_use")||block.optString("type").equals("mcp_tool_use"))throw new IOException("接口要求客户端工具执行，但本次仅启用了服务端内置工具。");content.put(block);}
   if(content.length()==0)throw new IOException("服务端暂停了工具调用，但没有返回可继续的内容块。");
   return new JSONObject().put("content",content).put("container",container).put("usage",usage);
  }

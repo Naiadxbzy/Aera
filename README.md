@@ -1,116 +1,101 @@
 # Aera
 
-Aera 是一款 Android AI 对话客户端，可自行配置模型提供商、接口地址和 API Key。
+Aera 是一款 Android 端大模型对话客户端，支持自定义模型供应商、服务地址与 API Key。
 
-## 功能
+## 功能概览
 
-- 支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和 Google Gemini 原生协议。
-- 流式回复、模型切换、按模型能力选择思考强度，以及接口返回的可读思考内容展示。
-- 对话历史搜索、重命名、置顶、归档、分支和 ZIP 备份恢复。
-- 图片与文件附件，Markdown、数学公式、语法着色代码块，以及 HTML / SVG 静态预览。
-- Tavily 联网搜索，以及 Responses、Anthropic、Gemini 和支持搜索的 Chat Completions 模型的内置搜索与来源展示。
-- 可选的服务端网页读取和代码执行，工具记录可在消息详情中查看；实际支持范围取决于协议和模型。
-- 新对话继承上次对话所选模型，思考强度从 Auto 开始。
-- 多会话生成、后台生成、消息队列和长会话分页。
-- 后台连接普通增强与可选 Shizuku 省电豁免，可在设置中检查和撤销；详见[后台连接说明](docs/background-connection.md)。
-- 浅色与深色主题、主题配色和思考强度动画配色。
+### 模型与协议
 
-模型能力、附件类型、搜索和思考内容的可用性取决于所选模型及服务接口。HTML / SVG 预览不执行 JavaScript，不能替代完整浏览器。
+- 原生支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 Google Gemini 四类接口协议。
+- 支持在线获取模型目录或手动录入模型 ID，支持按模型配置上下文长度、最大输出 Token、温度、Top P 与单价。
+- 按模型能力提供思考强度档位选择，折叠展示接口返回的可读思考内容。
+- 支持单会话独立覆盖模型、系统提示词、采样参数与联网设置，新建对话默认沿用上次所选模型。
+- 支持配置独立的话题命名模型自动生成对话标题。
 
-PDF 默认以原文件流式发送，保留扫描页、图片和图表；Aera 不设置固定的 PDF 文件大小上限。接口明确拒绝 PDF 或请求体过大且尚未返回内容时，会尝试将全部页面转为图像兼容发送一次。模型接口的页数、上下文和视觉能力仍会影响最终处理；加密、损坏或设备无法打开的文件会明确报错。PDF 预览支持流式文件来源，并可在原文件失效后使用已保存的快照翻页。DOCX、XLSX、PPTX 和文本文件在本地提取文字（最多 200000 字符，超出时明确标记截断），旧版 DOC / XLS / PPT 请先转换格式。
+### 对话与效率工具
 
-模型详情中的「PDF 转文字」和「图片转文字」分别配置开关与识别模型。开启 PDF 转文字时，仅将 PDF 通过系统组件逐页转图交给指定视觉模型；开启图片转文字时，仅处理独立图片附件。未开启的附件类型保持原发送方式。两项可选择不同模型，结果转为文字交回原模型回答，不会将整段对话发给识别服务。识别结果按附件内容和识别模型缓存，原始附件保留。旧版统一识别设置仅继承为 PDF 转文字，图片转文字默认关闭。识别会产生相应服务调用费用；失败、空结果或输出不完整时停止。未知二进制格式、损坏或加密文件不会被当成已识别文档。
+- 按对话自动保存未发送文本、光标选区与待发附件，切换会话或重建界面后自动恢复，并在历史列表中标记草稿状态。
+- 内置提示词库，支持在设置页与输入栏新建、编辑、搜索提示词模板，插入时可填写 `{{变量名}}` 占位符并写入当前光标选区。
+- 支持当前对话分支内关键词查找，提供命中计数、高亮定位、跨分页上下跳转，以及区分大小写、全词匹配和思考内容匹配选项。
+- 支持全局历史全文检索、重命名、置顶、归档、批量整理与长对话分页浏览。
+- 支持消息编辑、重新生成与多分支版本切换。
+- 支持将当前对话分支或单条消息导出为 UTF-8 `.md` 文件，保留角色、时间、模型名称、附件名称与参考来源链接。
+- 支持包含完整对话分支与可用附件快照的 ZIP 备份导出与导入恢复。
 
-已撤掉 PDFBox 和其加密库依赖，不再本地提取 PDF 文字层。DeepSeek 官方接口不支持原文件输入：未开启 PDF 转文字时，`deepseek-flash` 及兼容别名仍接收 PDF 的全部页面图像；Pro 等文本模型读取 PDF 需先开启 PDF 转文字并指定视觉模型。第三方供应商按各自的文件支持能力处理。详见 [DeepSeek 官方说明](https://api-docs.deepseek.com/guides/responses_api/)。
+### 富文本、工具与后台运行
 
-可在文件管理器或其他应用中选中文档，通过系统“分享”选择 Aera。分享文件只会添加到输入区并保留已有草稿，必须点击发送才会调用模型或加入消息队列。
+- 支持流式回复排版、LaTeX 行内与块级数学公式、语法着色代码块，以及 HTML / SVG 静态预览。
+- 流式输出期间支持上滑暂停自动跟随并保持阅读位置，点击底部按钮可恢复跟随。
+- 支持供应商内置联网搜索与 Tavily 搜索，在回复下方展示来源链接，同时支持按协议启用服务端网页读取与代码执行。
+- 支持多会话并行生成、当前会话消息排队、前台服务后台生成与可选 Shizuku 省电豁免，详情见[后台连接说明](docs/background-connection.md)。
+- 支持浅色、深色与跟随系统外观，可自定义主题色、背景色、表面色、文字色、思考动画配色及新对话欢迎页。
 
-## 开始使用
+## 文档与图片输入
 
-1. 进入设置，创建模型提供商。
-2. 填写接口地址和 API Key，并选择服务对应的接口协议。
-3. 获取模型列表或手动添加模型 ID，保存供应商。
+- 支持通过系统文件选择器、相册或系统分享导入图片、PDF、DOCX、XLSX、PPTX 与纯文本文件。系统分享导入的内容直接进入当前对话输入区并保留已有草稿，点击发送后正式提交或入队。
+- PDF 默认以原文件流式编码发送，支持客户端内翻页预览与快照留存。当上游接口拒绝原文件且尚未返回回复时，客户端自动将页面渲染为图像兼容重试一次。连接 DeepSeek 官方接口时，`deepseek-flash` 及同系视觉模型直接发送页面图像。
+- 模型详情页提供独立的「PDF 转文字」与「图片转文字」开关，可分别指定视觉识别模型。启用后先由视觉模型提取文本并按附件内容与模型标识缓存结果，再将识别文本提交给当前对话模型。
+- DOCX、XLSX、PPTX 与纯文本文件在本地流式提取正文文本，单文件提取上限为 200,000 字符。
+
+## 快速开始
+
+1. 打开「设置 → 模型与供应商」，新建模型供应商。
+2. 选择接口协议，填写服务地址与 API Key。
+3. 在线获取模型列表或手动录入模型 ID，保存供应商配置。
 4. 返回对话页选择模型，开始对话。
-
-API Key 在应用内配置，无需写入源码。消息和所选附件会发送至配置的模型服务；启用联网搜索时，相关查询还会发送至配置的搜索服务。请使用自己信任的接口地址。
-
-对话备份可能包含私人消息与附件。API Key、真实对话、附件、配置导出、日志及未脱敏截图均不应提交到公开仓库。
 
 ## 构建与测试
 
-最低支持 Android 7.0（API 24）。当前工程使用 Android SDK 37、Android Gradle Plugin 9.3.3 和 Gradle Wrapper 9.5.0。Gradle daemon 的 JVM 要求为 JDK 25（见 `gradle/gradle-daemon-jvm.properties`），Java 源码与字节码目标为 11。
+工程最低支持 Android 7.0（API 24），编译与目标平台为 Android SDK 37，使用 Android Gradle Plugin 9.3.3 与 Gradle Wrapper 9.5.0，Java 源码与字节码目标版本为 11，Gradle Daemon 运行环境为 JDK 25（见 `gradle/gradle-daemon-jvm.properties`）。通过 Android Studio 同步工程或在本机 `local.properties` 配置 Android SDK 路径后即可执行构建。
 
-使用兼容上述构建版本的 Android Studio 打开工程，安装 Android SDK 37 后同步 Gradle。确保 JDK 25 可用；Wrapper 可根据工程内的 daemon JVM 配置自动下载匹配的工具链。首次构建需要联网下载工具链与依赖；SDK 的本机路径通过 Android Studio 或未提交的 `local.properties` 配置。
-
-Windows PowerShell：
+### Windows PowerShell
 
 ```powershell
 .\gradlew.bat :app:assembleDebug
 .\gradlew.bat :app:testDebugUnitTest
 .\gradlew.bat :app:lintDebug
+.\gradlew.bat :app:connectedDebugAndroidTest
 ```
 
-macOS / Linux：
+### macOS / Linux
 
 ```sh
 chmod +x gradlew
 ./gradlew :app:assembleDebug
 ./gradlew :app:testDebugUnitTest
 ./gradlew :app:lintDebug
-```
-
-连接设备或启动模拟器后，可运行设备回归测试：
-
-```sh
 ./gradlew :app:connectedDebugAndroidTest
 ```
 
-Windows 使用 `.\gradlew.bat :app:connectedDebugAndroidTest`。JVM 测试与设备回归中的模型和搜索验证使用模拟数据，不需要真实模型 API Key。
+Debug 安装包输出至 `app/build/outputs/apk/debug/`，单元测试、设备回归测试与 Lint 报告输出至 `app/build/reports/`。运行 `connectedDebugAndroidTest` 前需连接 Android 设备或启动模拟器。
 
-Debug APK 输出到 `app/build/outputs/apk/debug/`，测试及 Lint 报告位于 `app/build/reports/`。这些产物不会随源码提交。
+## 签名与发布归档
 
-## 发布构建
+复制根目录下的 `keystore.properties.example` 为本机 `keystore.properties`，按 Java Properties 格式填写签名配置（Windows 路径使用 `/` 分隔符，字面反斜杠写作 `\\`）。
 
-使用 Android Studio 的 **Build → Generate Signed Bundle / APK → Create new** 创建发布密钥，将密钥保存在工程目录之外并备份。复制根目录的 `keystore.properties.example` 为 `keystore.properties`，在本机填写四个字段：
+| 字段 | 说明 |
+| --- | --- |
+| `storeFile` | 密钥库文件的绝对路径或相对工程根目录路径 |
+| `storePassword` | 密钥库密码 |
+| `keyAlias` | 签名密钥别名 |
+| `keyPassword` | 签名密钥密码 |
 
-- `storeFile`：密钥文件的绝对路径，或相对于工程根目录的路径。
-- `storePassword`：密钥库密码。
-- `keyAlias`：签名密钥别名。
-- `keyPassword`：签名密钥密码。
+配置完成后执行归档任务生成签名安装包。
 
-配置使用 Java Properties 格式。Windows 路径请使用 `/`；值中的反斜杠需要写成 `\\`。不要将密钥或密码粘贴到问题反馈、日志或公开仓库。`.gitignore` 已排除本机 `keystore.properties` 及签名密钥文件，公开模板不包含凭据。
-
-填写完整配置后生成并归档签名 APK：
-
-```sh
-./gradlew :app:archiveReleaseApk
+```powershell
+.\gradlew.bat :app:archiveReleaseApk
 ```
 
-Windows 使用 `.\gradlew.bat :app:archiveReleaseApk`。归档产物位于 `release-artifacts/Aera-<versionName>.apk`，可直接附加到 GitHub Release；该目录已被 Git 忽略，普通构建或 clean 不会清理它。标准构建产物仍位于 `app/build/outputs/apk/release/`。后续版本继续使用同一发布密钥，并递增 `versionCode`。
+macOS 与 Linux 环境执行 `./gradlew :app:archiveReleaseApk`。标准构建产物位于 `app/build/outputs/apk/release/`，按版本号命名的签名安装包输出至 `release-artifacts/Aera-<versionName>.apk`。覆盖升级时沿用应用 ID `com.changyu.ochat` 与同一签名密钥，并递增 `versionCode`。
 
-未创建本机签名配置时，Release 构建保留未签名产物 `app-release-unsigned.apk`，不能直接安装或作为正式 APK 分发。Debug 构建和默认 GitHub CI 不需要发布密钥。
+## 工程结构与仓库
 
-## GitHub 仓库
+| 路径 | 说明 |
+| --- | --- |
+| `app/src/main/` | Android 应用源码、AIDL 接口、保留规则与界面资源（包名与应用 ID 为 `com.changyu.ochat`） |
+| `app/src/test/` | JVM 本地单元测试 |
+| `app/src/androidTest/` | Android 设备与模拟器回归测试 |
+| `docs/` | 功能说明、版本发布说明与历次工程验证记录 |
+| `.github/workflows/android.yml` | GitHub Actions 持续集成配置，自动执行 Debug 构建、单元测试与 Lint 检查 |
 
-仓库名称统一使用 **Aera**。项目地址：[fogejoyog186-cpu/Aera](https://github.com/fogejoyog186-cpu/Aera)，下载见 [Releases](https://github.com/fogejoyog186-cpu/Aera/releases)。现有仓库的改名与本地 remote 更新步骤见[仓库改名说明](docs/repository-rename.md)。
-
-`.gitignore` 排除本机 SDK 配置、IDE 状态、构建产物、日志和签名凭据，保留 Gradle Wrapper。
-
-[Android 工作流](.github/workflows/android.yml)在 push、pull request 或手动触发时执行 Debug 构建、JVM 单元测试和 Lint。设备回归测试需单独运行，已知限制见下文。
-
-项目许可证尚待作者选择，当前未添加许可证文件。
-
-## 工程结构
-
-- `app/src/main/`：应用代码与资源。为兼容已安装版本，应用 ID 和 Java 包名继续使用 `com.changyu.ochat`；这属于稳定技术标识，桌面名称、系统分享入口及界面均显示 Aera。已有备份格式与附件标记同样保留兼容。
-- `app/src/test/`：JVM 单元测试。
-- `app/src/androidTest/`：Android 设备回归测试。
-- `docs/`：各次实现和验证记录；其中的测试结果只对应记录日期。
-
-## 已知限制与反馈
-
-当前已记录一项 Markdown 链接长按问题：长按结束后可能意外打开链接，对应 `InteractionRegressionTest#actualMarkdownTouchOpensCapturedBrowserAndCopyUsesRawCode`。复现和历史验证情况见[模型排序与联网上下文修正记录](docs/model-order-web-search-2026-11-06.md#验证和边界)。
-
-上下文 token 与费用为估算值，模型的实际输出上限及计费以服务端为准。使用默认 token 配置前，应按模型能力调整参数。
-
-反馈问题时，请附上应用版本、Android 版本、接口协议、模型 ID、复现步骤和脱敏后的错误信息。
+提交问题反馈时请附上应用版本、Android 系统版本、接口协议、模型 ID、复现步骤与脱敏后的错误详情。源码仓库、安装包发布页与远程地址说明分别见 [GitHub 仓库](https://github.com/Naiadxbzy/Aera)、[GitHub Releases](https://github.com/Naiadxbzy/Aera/releases) 与[仓库地址与包名兼容说明](docs/repository-rename.md)。

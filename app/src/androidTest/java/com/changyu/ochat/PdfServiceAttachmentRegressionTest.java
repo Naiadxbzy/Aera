@@ -70,7 +70,7 @@ public class PdfServiceAttachmentRegressionTest {
    JSONObject restored=MessageEdits.findSession(new JSONArray(prefs.getString("sessions","[]")),sessionId);
    JSONObject restoredDescriptor=restored.getJSONArray("messages").getJSONObject(0).getJSONArray("attachments").getJSONObject(0);
    descriptor=restoredDescriptor;
-   if(mode==SNAPSHOT)assertEquals(payload,AttachmentSnapshots.read(context,restoredDescriptor));
+   if(mode==SNAPSHOT)assertSnapshot(context,restoredDescriptor,pdf);
    else assertFalse(AttachmentSnapshots.has(restoredDescriptor));
    scenario=ActivityScenario.launch(MainActivity.class);
    scenario.onActivity(activity->{
@@ -101,7 +101,7 @@ public class PdfServiceAttachmentRegressionTest {
     JSONObject savedUser=saved.getJSONArray("messages").getJSONObject(0);
     if(mode==SNAPSHOT){
      JSONObject savedFile=savedUser.getJSONArray("attachments").getJSONObject(0);
-     assertTrue(AttachmentSnapshots.has(savedFile));assertEquals(payload,AttachmentSnapshots.read(context,savedFile));
+     assertTrue(AttachmentSnapshots.has(savedFile));assertSnapshot(context,savedFile,pdf);
     }
    }
   }finally{
@@ -111,6 +111,20 @@ public class PdfServiceAttachmentRegressionTest {
    if(descriptor!=null)AttachmentSnapshots.discard(context,descriptor);
    if(original!=null)original.delete();
   }
+ }
+ private void assertSnapshot(Context context,JSONObject descriptor,byte[] expected)throws Exception{
+  String snapshot=AttachmentSnapshots.read(context,descriptor);
+  assertNotNull(snapshot);
+  byte[] actual;
+  if(AttachmentSnapshots.isPdfPayload(snapshot)){
+   try(InputStream input=new FileInputStream(AttachmentSnapshots.pdfData(context,snapshot).file)){
+    actual=ConversationBackup.read(input,expected.length);
+   }
+  }else{
+   assertTrue(snapshot.startsWith("data:application/pdf;base64,"));
+   actual=Base64.decode(snapshot.substring(snapshot.indexOf(',')+1),Base64.DEFAULT);
+  }
+  assertTrue("Reloaded PDF snapshot bytes should match the original",Arrays.equals(expected,actual));
  }
  private void assertPdfBytes(JSONArray history,byte[] expected)throws Exception{
   assertEquals(1,history.length());JSONArray content=history.getJSONObject(0).getJSONArray("content");

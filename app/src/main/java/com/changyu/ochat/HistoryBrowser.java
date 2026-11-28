@@ -10,15 +10,25 @@ import org.json.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
+import java.util.regex.*;
 
 /** Recycled history rows, debounced off-thread full-text search with exact message targets. */
 final class HistoryBrowser {
  interface Open {void open(String sessionId,String messageId,String query);}
  private final Context context;private final ThemePalette palette;private final Handler main=new Handler(Looper.getMainLooper());private final ExecutorService search=Executors.newSingleThreadExecutor();
  private final List<Row> rows=new ArrayList<>();private final Map<String,Index> index=new HashMap<>();private final BaseAdapter adapter;private final ListView list;
- private int generation;private Runnable debounce;private String query="";private boolean archived;private JSONArray sessions=new JSONArray();private String current="";private final Open open;private final Consumer<String> actions;
+ private volatile int generation;
+ private Runnable debounce;
+ private Future<?> task;
+ private String query="",current="";
+ private Pattern pattern;
+ private boolean archived;
+ private List<JSONObject> sessions=Collections.emptyList();
+ private Set<String> drafts=Collections.emptySet();
+ private final Open open;
+ private final Consumer<String> actions;
  static final class Row {String id,title,snippet,message,group;boolean selected;}
- static final class Index {String signature,title;final List<String[]> messages=new ArrayList<>();}
+ static final class Index {JSONObject snapshot;String title;final List<String[]> messages=new ArrayList<>();}
  HistoryBrowser(Context context,Open open,Consumer<String> actions){
   this.context=context;this.open=open;this.actions=actions;palette=ThemePalette.resolve(context);list=new ListView(context);list.setDivider(null);list.setClipToPadding(false);list.setPadding(0,UiStyle.dp(context,8),0,UiStyle.dp(context,16));
   adapter=new BaseAdapter(){
@@ -36,20 +46,105 @@ final class HistoryBrowser {
   list.setAdapter(adapter);list.setOnItemClickListener((p,v,i,id)->{Row r=rows.get(i);open.open(r.id,r.message,query);});list.setOnItemLongClickListener((p,v,i,id)->{actions.accept(rows.get(i).id);return true;});
  }
  View view(){return list;}
- void filter(String query,boolean archived){this.query=query.trim().toLowerCase(Locale.ROOT);this.archived=archived;refresh(sessions,current);}
- void refresh(JSONArray all,String current){sessions=all;this.current=current;int ticket=++generation;if(debounce!=null)main.removeCallbacks(debounce);debounce=()->search.execute(()->build(all,current,query,archived,ticket));main.postDelayed(debounce,query.isEmpty()?0:250);}
- private void build(JSONArray all,String current,String query,boolean archived,int ticket){
-  List<Row> found=new ArrayList<>();Map<String,Long> times=new HashMap<>();long now=System.currentTimeMillis();
-  for(int i=0;i<all.length();i++){if(ticket!=generation)return;JSONObject s=all.optJSONObject(i);if(s==null||s.optBoolean("archived")!=archived)continue;String id=s.optString("id");JSONArray messages=s.optJSONArray("messages");String signature=s.optLong("updatedAt")+":"+s.optString("title")+":"+s.optString("activeBranchId")+":"+(messages==null?0:messages.length());
-   Index doc=index.get(id);if(doc==null||!signature.equals(doc.signature)){doc=new Index();doc.signature=signature;doc.title=s.optString("title","新对话");if(messages!=null)for(int j=0;j<messages.length();j++){JSONObject m=messages.optJSONObject(j);if(m!=null)doc.messages.add(new String[]{m.optString("id"),m.optString("text"),m.optString("text").toLowerCase(Locale.ROOT)});}index.put(id,doc);}
-   Row row=new Row();row.id=id;row.title=(s.optBoolean("pinned")?"置顶 · ":"")+doc.title;row.selected=id.equals(current);row.snippet="";row.message="";boolean match=query.isEmpty()||doc.title.toLowerCase(Locale.ROOT).contains(query);
-   if(!query.isEmpty())for(String[] m:doc.messages){int at=m[2].indexOf(query);if(at>=0){match=true;row.message=m[0];int start=Math.max(0,at-22),end=Math.min(m[1].length(),at+query.length()+65);row.snippet=(start>0?"…":"")+m[1].substring(start,end).replace('\n',' ')+(end<m[1].length()?"…":"");break;}}
-   if(match){row.group=s.optBoolean("pinned")?"置顶":HistoryDates.group(s.optLong("updatedAt",s.optLong("createdAt",HistoryDates.parseLegacy(s.optString("time"),now))),now);found.add(row);times.put(id,s.optLong("updatedAt",s.optLong("createdAt",0)));}
-  }
-  found.sort((a,b)->{boolean ap=a.group.equals("置顶"),bp=b.group.equals("置顶");if(ap!=bp)return ap?-1:1;return Long.compare(times.get(b.id),times.get(a.id));});
-  String previous="";for(Row r:found){String group=r.group;r.group=group.equals(previous)?"":group;previous=group;}
-  main.post(()->{if(ticket!=generation)return;rows.clear();rows.addAll(found);adapter.notifyDataSetChanged();});
+ void filter(String query,boolean archived){
+  this.query=query.trim();
+  pattern=this.query.isEmpty()?null:TextSearch.pattern(this.query,false,false);
+  this.archived=archived;
+  refresh(sessions,current,drafts);
  }
- private CharSequence highlight(String text){SpannableString value=new SpannableString(text);if(query.isEmpty())return value;int at=text.toLowerCase(Locale.ROOT).indexOf(query);if(at>=0)value.setSpan(new ForegroundColorSpan(palette.primary),at,Math.min(text.length(),at+query.length()),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);return value;}
- void close(){generation++;main.removeCallbacksAndMessages(null);search.shutdownNow();index.clear();}
+
+ void refresh(List<JSONObject> all,String current,Set<String> drafts){
+  sessions=all;
+  this.drafts=drafts;
+  this.current=current;
+  final int ticket=++generation;
+  final Pattern term=pattern;
+  final boolean filterArchive=archived;
+  if(debounce!=null)main.removeCallbacks(debounce);
+  if(task!=null)task.cancel(true);
+  debounce=()->task=search.submit(()->build(all,current,term,filterArchive,drafts,ticket));
+  main.postDelayed(debounce,term==null?0:180);
+ }
+
+ private void build(List<JSONObject> all,String current,Pattern term,boolean archived,Set<String> drafts,int ticket){
+  List<Row> found=new ArrayList<>();
+  Map<String,Long> times=new HashMap<>();
+  Set<String> alive=new HashSet<>();
+  long now=System.currentTimeMillis();
+  for(JSONObject session:all){
+   if(ticket!=generation)return;
+   String id=session.optString("id");
+   alive.add(id);
+   if(session.optBoolean("archived")!=archived)continue;
+   Index doc=index.get(id);
+   if(doc==null||doc.snapshot!=session){
+    doc=new Index();
+    doc.snapshot=session;
+    doc.title=session.optString("title","新对话");
+    JSONArray messages=session.optJSONArray("messages");
+    for(int j=0;messages!=null&&j<messages.length();j++){
+     if(ticket!=generation)return;
+     JSONObject message=messages.optJSONObject(j);
+     if(message!=null)doc.messages.add(new String[]{message.optString("id"),message.optString("text")});
+    }
+    index.put(id,doc);
+   }
+   Row row=new Row();
+   row.id=id;
+   row.title=(session.optBoolean("pinned")?"置顶 · ":"")+doc.title;
+   row.selected=id.equals(current);
+   row.snippet=term==null&&drafts.contains(id)?"草稿":"";
+   row.message="";
+   boolean match=term==null||term.matcher(doc.title).find();
+   if(term!=null)for(String[] message:doc.messages){
+    if(ticket!=generation)return;
+    Matcher matcher=term.matcher(message[1]);
+    if(matcher.find()){
+     match=true;
+     row.message=message[0];
+     row.snippet=TextSearch.excerpt(message[1],matcher.start(),matcher.end());
+     break;
+    }
+   }
+   if(match){
+    long timestamp=session.optLong("updatedAt",session.optLong("createdAt",HistoryDates.parseLegacy(session.optString("time"),now)));
+    row.group=session.optBoolean("pinned")?"置顶":HistoryDates.group(timestamp,now);
+    found.add(row);
+    times.put(id,timestamp);
+   }
+  }
+  index.keySet().retainAll(alive);
+  found.sort((a,b)->{
+   boolean ap=a.group.equals("置顶"),bp=b.group.equals("置顶");
+   if(ap!=bp)return ap?-1:1;
+   return Long.compare(times.get(b.id),times.get(a.id));
+  });
+  String previous="";
+  for(Row row:found){
+   String group=row.group;
+   row.group=group.equals(previous)?"":group;
+   previous=group;
+  }
+  main.post(()->{
+   if(ticket!=generation)return;
+   rows.clear();
+   rows.addAll(found);
+   adapter.notifyDataSetChanged();
+  });
+ }
+
+ private CharSequence highlight(String text){
+  if(pattern==null)return text;
+  Matcher matcher=pattern.matcher(text);
+  if(!matcher.find())return text;
+  SpannableString value=new SpannableString(text);
+  value.setSpan(new ForegroundColorSpan(palette.primary),matcher.start(),matcher.end(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+  return value;
+ }
+
+ void close(){
+  generation++;
+  main.removeCallbacksAndMessages(null);
+  search.shutdownNow();
+ }
 }

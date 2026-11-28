@@ -30,6 +30,7 @@ public class SettingsHomeActivity extends AppCompatActivity {
         ScrollView scroll=new ScrollView(this); LinearLayout body=new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(dp(18),dp(8),dp(18),dp(28)); body.addView(text("偏好与功能",13,muted,true));
         addCard(body,"模型与供应商","管理已创建的供应商和模型",v->startActivity(new Intent(this,ProviderListActivity.class)));
         addCard(body,"对话设置","全局对话默认参数与初始系统提示词",v->open("conversation"));
+        addCard(body,"提示词库","管理可在输入框复用的模板",v->new PromptLibraryUi(this,prefs).manage());
         String searchMode=prefs.getString(SearchOptions.PREF,SearchOptions.AUTO);String searchSummary=SearchOptions.RESPONSES.equals(searchMode)?"Responses内置搜索 · 无需 Tavily Key":SearchOptions.TAVILY.equals(searchMode)?(prefs.getString("tavilyKey","").trim().isEmpty()?"Tavily · Key 未配置":"Tavily · Key 已配置"):"自动 · 按供应商协议选择";
         addCard(body,"联网搜索",searchSummary,v->open("search"));
         addCard(body,"后台连接",BackgroundProtection.summary(this),v->startActivity(new Intent(this,BackgroundSettingsActivity.class)));

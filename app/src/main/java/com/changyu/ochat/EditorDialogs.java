@@ -24,9 +24,7 @@ final class EditorDialogs {
   return editor;
  }
  static void prepare(AlertDialog dialog,EditText editor){
-  // The caller has already created the dialog. Calling create() here is unsafe: dialogs
-  // returned by PaletteDialogs.builder() use an overridden create() hook, so re-entering
-  // it from preparation can recurse while the dialog is being shown.
+  PaletteDialogs.prepare(dialog);
   ThemePalette p=ThemePalette.resolve(editor.getContext());
   Window window=dialog.getWindow();
   if(window!=null){
@@ -35,8 +33,6 @@ final class EditorDialogs {
    androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,true);
    color(window.getDecorView(),editor,p);
   }
-  // Run last: recursive title coloring must not overwrite action foregrounds.
-  PaletteDialogs.prepare(dialog);
  }
  private static void color(View view,EditText editor,ThemePalette p){
   if(view==editor || view instanceof android.widget.Button)return;

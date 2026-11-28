@@ -141,10 +141,12 @@ final class MarkdownRenderer {
  }
  
  static void render(Markwon renderer,TextView view,String source){
-  view.setTextIsSelectable(true);
-  view.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
-  view.setLinksClickable(true);
-  view.setOnTouchListener(new SelectableSpanTouch());
+  if(view.getMovementMethod()!=SelectableSpanTouch.MOVEMENT){
+   view.setTextIsSelectable(true);
+   view.setMovementMethod(SelectableSpanTouch.MOVEMENT);
+   view.setLinksClickable(true);
+   view.setOnTouchListener(new SelectableSpanTouch());
+  }
   renderer.setMarkdown(view,source==null?"":source);
  }
  

@@ -14,7 +14,15 @@ import java.util.zip.*;
 final class ConversationBackup {
  static final int MAX_JSON=32*1024*1024,MAX_TOTAL=150*1024*1024,MAX_FILE=MAX_TOTAL;
  static int exportTo(Context context,Uri uri,String snapshot)throws Exception{
-  JSONArray sessions=new JSONArray(snapshot);Map<String,File> files=new LinkedHashMap<>();Map<String,String> uris=new HashMap<>();int[] total={0},missing={0};
+  return exportSessions(context,uri,new JSONArray(snapshot));
+ }
+ static int exportTo(Context context,Uri uri,List<JSONObject> snapshots)throws Exception{
+  JSONArray sessions=new JSONArray();
+  for(JSONObject snapshot:snapshots)sessions.put(SessionRepository.detached(snapshot));
+  return exportSessions(context,uri,sessions);
+ }
+ private static int exportSessions(Context context,Uri uri,JSONArray sessions)throws Exception{
+  Map<String,File> files=new LinkedHashMap<>();Map<String,String> uris=new HashMap<>();int[] total={0},missing={0};
   try{
    walk(sessions,d->{
     String original=d.optString("uri");if(original.isEmpty())return;String name=uris.get(original);
@@ -52,8 +60,8 @@ final class ConversationBackup {
    try(InputStream stream=context.getContentResolver().openInputStream(uri);ZipInputStream zip=new ZipInputStream(Objects.requireNonNull(stream))){
     ZipEntry entry;int count=0;while((entry=zip.getNextEntry())!=null){
      if(++count>3000)throw new IOException("备份文件条目过多");String path=entry.getName();if(!names.add(path)||entry.isDirectory()||(!path.equals("conversations.json")&&!path.matches("attachments/[a-zA-Z0-9-]+")))throw new IOException("备份包含无效或重复条目");
-     if(path.equals("conversations.json")){byte[] bytes=read(zip,MAX_JSON);total+=bytes.length;root=new JSONObject(new String(bytes,StandardCharsets.UTF_8));}
-     else {File spool=File.createTempFile("restore-",".part",context.getCacheDir());files.put(path,spool);try(OutputStream out=new FileOutputStream(spool)){total+=copy(zip,out,MAX_FILE);}}
+     if(path.equals("conversations.json")){byte[] bytes=read(zip,Math.min(MAX_JSON,MAX_TOTAL-total));total+=bytes.length;root=new JSONObject(new String(bytes,StandardCharsets.UTF_8));}
+     else {File spool=File.createTempFile("restore-",".part",context.getCacheDir());files.put(path,spool);try(OutputStream out=new FileOutputStream(spool)){total+=copy(zip,out,Math.min(MAX_FILE,MAX_TOTAL-total));}}
      if(total>MAX_TOTAL)throw new IOException("备份解压后过大");zip.closeEntry();
     }
    }

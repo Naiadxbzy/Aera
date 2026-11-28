@@ -33,7 +33,7 @@ final class AnthropicToolRequest {
     try(Response closed=response){
      if(!closed.isSuccessful()){target.onError(httpError(closed));return;}
      if(closed.body()==null)throw new IOException("接口没有返回内容");
-     if(closed.header("Content-Type","").contains("application/json")){JSONObject value=new JSONObject(closed.body().string());if(value.has("error"))throw new IOException(ApiFailure.provider(value));throw new IOException("invalid_stream：已请求流式回复，但接口返回 application/json。");}
+     if(closed.header("Content-Type","").contains("application/json")){JSONObject value=ChatApiClient.readJson(closed);if(ApiFailure.isProviderError(value,value.optString("type")))throw new IOException(ApiFailure.provider(value));throw new IOException("invalid_stream：已请求流式回复，但接口返回 application/json。");}
      JSONObject pause=client.parseSse(closed.body().byteStream(),ChatApiClient.ANTHROPIC,callback);
      if(pause!=null&&!client.cancelled()){
       addUsage(pause.getJSONObject("usage"));
@@ -51,10 +51,10 @@ final class AnthropicToolRequest {
    public void onResponse(Call call,Response response){
     try(Response closed=response){
      if(!closed.isSuccessful()){target.onError(httpError(closed));return;}
-     JSONObject value=new JSONObject(closed.body()==null?"":closed.body().string());if(value.has("error"))throw new IOException(ApiFailure.provider(value));
+     JSONObject value=ChatApiClient.readJson(closed);if(ApiFailure.isProviderError(value,value.optString("type")))throw new IOException(ApiFailure.provider(value));
      NativeToolState state=new NativeToolState();state.complete(ChatApiClient.ANTHROPIC,value,NativeToolState.callback(target));mergeSources(state.sources,state.searchStatus);
      if(options.grounded())target.onSearchSources(sources,sourceStatus.isEmpty()?"本次未调用搜索或网页读取":sourceStatus);
-     JSONArray content=value.optJSONArray("content");for(int i=0;content!=null&&i<content.length();i++){JSONObject part=content.optJSONObject(i);if(part!=null&&part.optString("type").equals("text"))text.append(part.optString("text"));}
+     JSONArray content=value.optJSONArray("content");for(int i=0;content!=null&&i<content.length();i++){JSONObject part=content.optJSONObject(i);if(part!=null&&part.optString("type").equals("text")){String valueText=part.optString("text");if(text.length()+valueText.length()>SseReader.MAX_TEXT)throw new IOException("response_limit：回复超过本机可显示的大小。");text.append(valueText);}}
      addUsage(GenerationResult.usage(value.optJSONObject("usage")));
      if("pause_turn".equals(value.optString("stop_reason"))){
       if(resume(state.paused(new JSONObject())))chat(target);

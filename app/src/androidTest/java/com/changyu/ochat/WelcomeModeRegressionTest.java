@@ -41,7 +41,7 @@ public class WelcomeModeRegressionTest {
    settings=instrumentation.startActivitySync(new Intent(context,SettingsOptionActivity.class).putExtra("mode","theme").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
    Activity options=settings;
    onMain(instrumentation,()->{
-    View[] controls=(View[])field(options,"copyControls");assertEquals(View.VISIBLE,((View)field(options,"iconControls")).getVisibility());assertEquals(View.GONE,controls[3].getVisibility());assertEquals(View.VISIBLE,controls[0].getVisibility());
+    View[] controls=(View[])field(options,"copyControls");assertEquals(View.VISIBLE,((View)field(options,"iconControls")).getVisibility());assertEquals(View.GONE,controls[3].getVisibility());assertEquals(View.GONE,controls[0].getVisibility());assertEquals(View.VISIBLE,controls[2].getVisibility());
     RadioGroup modes=(RadioGroup)field(options,"welcomeModes");modes.check(((View)field(options,"textMode")).getId());
     assertEquals(View.GONE,((View)field(options,"iconControls")).getVisibility());assertEquals(View.VISIBLE,controls[3].getVisibility());assertEquals("content://missing/image",field(options,"welcomeUri"));assertEquals("square",field(options,"welcomeShape"));
     assertEquals("Welcome title test",((EditText[])field(options,"homeCopyFields"))[3].getText().toString());

@@ -29,6 +29,13 @@ final class MessageEdits {
         }
         return null;
     }
+    static int indexOf(JSONArray messages,String id) {
+        for(int i=0;messages!=null&&i<messages.length();i++) {
+            JSONObject message=messages.optJSONObject(i);
+            if(message!=null&&id.equals(message.optString("id")))return i;
+        }
+        return -1;
+    }
     static JSONObject apply(JSONArray sessions,String sessionId,String messageId,String text,boolean retry) throws JSONException {
         JSONObject session=findSession(sessions,sessionId);
         JSONArray messages=session==null?null:session.optJSONArray("messages");

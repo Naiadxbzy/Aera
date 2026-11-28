@@ -14,7 +14,7 @@ final class ReasoningView extends LinearLayout {
  private final MarkdownMessageView content;
  private final Consumer<Boolean> changed;
  private String text="",rendered="",title="思考过程";
- private boolean expanded;
+ private boolean expanded,streaming,renderedStreaming;
  ReasoningView(Context c,Markwon markdown,Consumer<Boolean> changed){
   super(c);this.changed=changed;setTag("reasoning-view");setOrientation(VERTICAL);
   ThemePalette p=ThemePalette.resolve(c);
@@ -24,17 +24,25 @@ final class ReasoningView extends LinearLayout {
   content.setPadding(UiStyle.dp(c,12),UiStyle.dp(c,10),UiStyle.dp(c,12),UiStyle.dp(c,12));content.setBackground(UiStyle.surface(c,androidx.core.graphics.ColorUtils.blendARGB(p.page,p.ink,p.dark?.06f:.035f),12,false));content.setVisibility(GONE);LayoutParams body=new LayoutParams(-1,-2);body.bottomMargin=UiStyle.dp(c,12);addView(content,body);
   heading.setOnClickListener(v->{setExpanded(!expanded);changed.accept(expanded);});
  }
- void bind(String text,boolean thinking,boolean interrupted,boolean summary,boolean expanded){
+ void bind(String text,boolean thinking,boolean interrupted,boolean summary,boolean expanded,boolean streaming){
+  this.streaming=streaming;
   this.text=text==null?"":text;
   title=thinking?"正在思考":interrupted?"思考已中断":summary?"思考摘要":"思考过程";
   setVisibility(this.text.isEmpty()?GONE:VISIBLE);setExpanded(expanded);
  }
  private void setExpanded(boolean value){
-  expanded=value;UiStyle.textIfChanged(heading,title+(expanded?"  ▾":"  ▸"));
-  heading.setContentDescription((expanded?"收起":"展开")+"思考内容");
-  if(android.os.Build.VERSION.SDK_INT>=30)heading.setStateDescription(expanded?"已展开":"已折叠");
+  expanded=value;
+  UiStyle.textIfChanged(heading,title+(expanded?"  ▾":"  ▸"));
+  String description=(expanded?"收起":"展开")+"思考内容";
+  if(!description.equals(heading.getContentDescription())){
+   heading.setContentDescription(description);
+   if(android.os.Build.VERSION.SDK_INT>=30)heading.setStateDescription(expanded?"已展开":"已折叠");
+  }
   content.setVisibility(expanded?VISIBLE:GONE);
-  if(expanded&&!text.equals(rendered)){content.setMarkdown(text);rendered=text;}
+  if(expanded&&(!text.equals(rendered)||streaming!=renderedStreaming)){
+   if(streaming)content.setStreamingMarkdown(text);else content.setMarkdown(text);
+   rendered=text;renderedStreaming=streaming;
+  }
  }
  boolean expanded(){return expanded;}
 }

@@ -33,16 +33,26 @@ public final class ChatGenerationService extends Service {
   volatile boolean finished;private volatile String sourceUpdate="";boolean error,stopped,started;StreamingMarkdown stream,reasoningStream;
   boolean enhanced,networkDisrupted;String phaseStatus="正在准备上下文和附件…",networkNote="";Runnable pendingNetworkAction;long waitingSince,startedElapsed;
   JSONObject configuredModel=new JSONObject(),usage=new JSONObject();String completionState="complete",finishReason="",searchNote="",searchStatus="";final JSONArray toolEvents=new JSONArray();int contextTokens,omittedMessages;long startedAt;
+  Future<?> work;
+  StreamingMarkdown.Updates renderUpdates;
+  String lastCheckpointAnswer,lastCheckpointThought,lastCheckpointStatus;
+  int lastCheckpointTools=-1;
+  volatile boolean stopRequested;
+  SearchSources lastCheckpointSources;
+  String answer(){return stream==null?partial.toString():stream.snapshot();}
+  String thought(){return reasoningStream==null?reasoningText.toString():reasoningStream.snapshot();}
   Run(String sessionId,String modelId,String effort,long timestamp){this.sessionId=sessionId;this.modelId=modelId;this.effort=effort;this.timestamp=timestamp;}
  }
  private final Handler main=new Handler(Looper.getMainLooper());
  private final ExecutorService worker=Executors.newFixedThreadPool(2);
+ private final Set<Run> ownedRuns=new HashSet<>();
  private PowerManager.WakeLock wake;
  private long wakeRenewAt;
  private GenerationNetworkMonitor network;
+ private boolean foreground;
  private final Runnable checkpoint=new Runnable(){public void run(){
-  for(Run run:new ArrayList<>(runs.values()))if(valid(run)){
-   persist(run,false);
+  for(Run run:new ArrayList<>(runs.values()))if(valid(run)&&run.started){
+   persist(run,false,false);
    if(run.waitingSince>0&&SystemClock.elapsedRealtime()-run.waitingSince>=10*60*1000L){run.finishReason="等待网络恢复超过 10 分钟，请检查网络与后台设置后重试";finish(run,run.finishReason,true,false);}
    else if(!run.enhanced&&SystemClock.elapsedRealtime()-run.startedElapsed>30*60*1000L){run.finishReason="本次生成已达 30 分钟，可在设置 → 后台连接开启普通增强";finish(run,run.finishReason,true,true);}
   }
@@ -55,12 +65,25 @@ public final class ChatGenerationService extends Service {
  static void attach(Listener target){listener=new WeakReference<>(target);for(Run run:new ArrayList<>(runs.values()))target.changed(run);}
  static void detach(Listener target){if(listener.get()==target)listener.clear();}
  static void launch(Context context,Run run){
-  if(runs.containsKey(run.sessionId))throw new IllegalStateException("本对话已有回复正在生成");
-  runs.put(run.sessionId,run);current=run;
-  try{ContextCompat.startForegroundService(context.getApplicationContext(),new Intent(context,ChatGenerationService.class));}
-  catch(RuntimeException failure){runs.remove(run.sessionId);current=runs.isEmpty()?null:runs.values().iterator().next();throw failure;}
+  if(runs.putIfAbsent(run.sessionId,run)!=null)throw new IllegalStateException("本对话已有回复正在生成");
+  current=run;
+  try{
+   if(context instanceof ChatGenerationService&&((ChatGenerationService)context).foreground){
+    ChatGenerationService service=(ChatGenerationService)context;
+    service.main.post(()->service.begin(run));
+   }else ContextCompat.startForegroundService(context.getApplicationContext(),new Intent(context,ChatGenerationService.class));
+  }catch(RuntimeException failure){
+   runs.remove(run.sessionId,run);
+   if(current==run)current=runs.isEmpty()?null:runs.values().iterator().next();
+   throw failure;
+  }
  }
- static void stop(Context context,Run run){context.startService(new Intent(context,ChatGenerationService.class).setAction(STOP).putExtra("runId",run.id));}
+ static void stop(Context context,Run run){
+  if(!valid(run)||run.stopRequested)return;
+  run.stopRequested=true;
+  try{context.startService(new Intent(context,ChatGenerationService.class).setAction(STOP).putExtra("runId",run.id));}
+  catch(RuntimeException failure){run.stopRequested=false;throw failure;}
+ }
  private static boolean valid(Run run){return run!=null&&run==runs.get(run.sessionId)&&!run.finished&&!run.cancel.isCancelled();}
  private static void publish(Run run){Listener target=listener.get();if(target!=null)target.changed(run);}
  static JSONArray history(JSONObject session,String prompt)throws JSONException{
@@ -69,25 +92,57 @@ public final class ChatGenerationService extends Service {
   return result;
  }
  static void enqueue(Context context,String sessionId,JSONObject queued)throws JSONException{
-  SharedPreferences prefs=context.getSharedPreferences("chat",MODE_PRIVATE);JSONObject session=MessageEdits.findSession(SessionRepository.get(prefs).read(),sessionId);if(session==null)throw new JSONException("对话不存在");
-  JSONArray queue=session.optJSONArray("outbox");if(queue==null){queue=new JSONArray();session.put("outbox",queue);}if(queue.length()>=10)throw new JSONException("最多排队 10 条消息");
-  queue.put(queued);SessionRepository.get(prefs).upsert(session);
+  SharedPreferences prefs=context.getSharedPreferences("chat",MODE_PRIVATE);
+  SessionRepository repository=SessionRepository.get(prefs);
+  JSONObject session=MessageEdits.findSession(repository.read(),sessionId);
+  if(session==null)throw new JSONException("对话不存在");
+  Run active=active(sessionId);
+  if(active!=null&&active.stopRequested)throw new JSONException("回复正在结束，请稍后发送");
+  JSONArray queue=session.optJSONArray("outbox");
+  if(queue==null){queue=new JSONArray();session.put("outbox",queue);}
+  if(queue.length()>=10)throw new JSONException("最多排队 10 条消息");
+  queue.put(queued.put("branchId",active==null?session.optString("activeBranchId"):active.branchId));
+  repository.upsertAfterSend(session);
  }
- static void resumeQueue(Context context,String sessionId){
-  if(active(sessionId)!=null)return;
-  SharedPreferences prefs=context.getSharedPreferences("chat",MODE_PRIVATE);JSONObject session=MessageEdits.findSession(SessionRepository.get(prefs).read(),sessionId);if(session==null)return;
-  JSONArray queue=session.optJSONArray("outbox");if(queue==null||queue.length()==0)return;JSONObject next=queue.optJSONObject(0);
+
+ /** Returns a user-facing reason when an item could not be started. */
+ static String resumeQueue(Context context,String sessionId){
+  if(active(sessionId)!=null)return "";
+  SharedPreferences prefs=context.getSharedPreferences("chat",MODE_PRIVATE);
+  SessionRepository repository=SessionRepository.get(prefs);
+  JSONObject session=MessageEdits.findSession(repository.read(),sessionId);
+  JSONArray queue=session==null?null:session.optJSONArray("outbox");
+  if(queue==null||queue.length()==0)return "";
   try{
-   JSONObject config=next.optJSONObject("config");if(config==null)config=SessionConfig.capture(prefs);
-   JSONObject temp=new JSONObject().put("config",config);SessionConfig scoped=new SessionConfig(prefs,temp);JSONObject provider=scoped.provider();
-   if(provider.optString("api").isEmpty()||provider.optString("apiKey").isEmpty())return;
-   JSONObject message=next.getJSONObject("message");session.getJSONArray("messages").put(message);queue.remove(0);ConversationBranches.sync(session);SessionRepository.get(prefs).upsert(session);
-   Run run=new Run(sessionId,scoped.getString("modelId",""),scoped.getString("reasoningEffort","default"),System.currentTimeMillis());
-   run.base=provider.optString("api");run.key=provider.optString("apiKey");run.protocol=provider.optString("protocol",ChatApiClient.CHAT_COMPLETIONS);run.configuredModel=ModelCapabilities.find(provider,run.modelId);
-   run.temperature=scoped.getString("conversationTemperature","0.7");run.topP=scoped.getString("conversationTopP","0.9");run.outputTokens=scoped.getString("outputTokens",run.configuredModel.optString("outputTokens",ContextBudget.DEFAULT_OUTPUT_TEXT));
-   run.search=SearchOptions.capture(scoped,run.protocol);run.session=session;run.branchId=session.optString("activeBranchId");run.history=history(session,scoped.getString("systemPrompt",""));run.query=message.optString("text");
+   String branchId=session.optString("activeBranchId");
+   int index=GenerationQueue.next(queue,branchId);
+   if(index<0)return "排队消息属于其他消息版本，请切回对应版本继续发送。";
+   JSONObject next=queue.getJSONObject(index);
+   JSONObject config=next.optJSONObject("config");
+   if(config==null)config=SessionConfig.capture(prefs);
+   SessionConfig scoped=new SessionConfig(prefs,new JSONObject().put("config",SessionRepository.detached(config)));
+   JSONObject provider=scoped.provider();
+   String model=scoped.getString("modelId","");
+   JSONObject configuredModel=ModelCapabilities.find(provider,model);
+   if(provider.optString("api").isEmpty()||provider.optString("apiKey").isEmpty()||!configuredModel.has("id")){
+    return "排队消息的供应商或模型不可用。恢复该配置后可继续发送。";
+   }
+   JSONObject projected=GenerationQueue.promote(session,index);
+   Run run=new Run(sessionId,model,scoped.getString("reasoningEffort","default"),System.currentTimeMillis());
+   run.base=provider.optString("api");run.key=provider.optString("apiKey");run.protocol=provider.optString("protocol",ChatApiClient.CHAT_COMPLETIONS);
+   run.configuredModel=configuredModel;
+   run.temperature=scoped.getString("conversationTemperature","0.7");run.topP=scoped.getString("conversationTopP","0.9");run.outputTokens=scoped.getString("outputTokens",configuredModel.optString("outputTokens",ContextBudget.DEFAULT_OUTPUT_TEXT));
+   run.search=SearchOptions.capture(scoped,run.protocol);
+   if(!run.search.error.isEmpty())return run.search.error;
+   run.branchId=branchId;run.history=history(projected,scoped.getString("systemPrompt",""));run.query=next.getJSONObject("message").optString("text");
    launch(context,run);
-  }catch(Exception failure){android.util.Log.e("ChatGeneration","Unable to resume queue",failure);}
+   repository.upsert(projected);
+   run.session=repository.snapshot(sessionId);
+   return "";
+  }catch(Exception failure){
+   android.util.Log.w("ChatGeneration","Unable to resume queue",failure);
+   return "暂时无法启动排队消息，队列已保留，请重试。";
+  }
  }
  @Override public void onCreate(){
   super.onCreate();if(Build.VERSION.SDK_INT>=26){
@@ -99,27 +154,50 @@ public final class ChatGenerationService extends Service {
  @Override public int onStartCommand(Intent intent,int flags,int startId){
   if(intent!=null&&STOP.equals(intent.getAction())){
    for(Run run:new ArrayList<>(runs.values()))if(run.id.equals(intent.getStringExtra("runId"))){
-    JSONObject session=MessageEdits.findSession(SessionRepository.get(getSharedPreferences("chat",MODE_PRIVATE)).read(),run.sessionId);if(session!=null){session.remove("outbox");SessionRepository.get(getSharedPreferences("chat",MODE_PRIVATE)).upsert(session);}
-    finish(run,"",false,true);break;
-   }return START_NOT_STICKY;
+    finish(run,"",false,true,true);
+    break;
+   }
+   if(runs.isEmpty())stopSelf(startId);
+   return START_NOT_STICKY;
   }
-  if(runs.isEmpty()){stopSelf();return START_NOT_STICKY;}
+  if(runs.isEmpty()){stopSelf(startId);return START_NOT_STICKY;}
   try{
-   Run representative=active();if(Build.VERSION.SDK_INT>=29)startForeground(NOTICE,notification(representative),ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);else startForeground(NOTICE,notification(representative));
+   Run representative=active();
+   if(Build.VERSION.SDK_INT>=29)startForeground(NOTICE,notification(representative),ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+   else startForeground(NOTICE,notification(representative));
+   foreground=true;
    renewWake();
-  }catch(RuntimeException failure){for(Run run:new ArrayList<>(runs.values()))finish(run,"无法启动后台生成服务，请重试。",true,false);return START_NOT_STICKY;}
-  for(Run run:new ArrayList<>(runs.values()))if(!run.started){
-   run.started=true;run.startedAt=System.currentTimeMillis();run.startedElapsed=SystemClock.elapsedRealtime();run.enhanced=BackgroundProtection.enabled(this);run.client.withModel(run.configuredModel).withBackgroundResilience(run.enhanced);
-   run.stream=new StreamingMarkdown(run.partial,text->{if(valid(run))publish(run);});
-   run.reasoningStream=new StreamingMarkdown(run.reasoningText,text->{if(valid(run))publish(run);});publish(run);
-   if(networkReady(run,()->prepare(run)))prepare(run);
+  }catch(RuntimeException failure){
+   for(Run run:new ArrayList<>(runs.values()))finish(run,"无法启动后台生成服务，请重试。",true,false);
+   return START_NOT_STICKY;
   }
-  main.removeCallbacks(checkpoint);main.postDelayed(checkpoint,3000);return START_NOT_STICKY;
+  for(Run run:new ArrayList<>(runs.values()))begin(run);
+  return START_NOT_STICKY;
+ }
+
+ private void begin(Run run){
+  if(!valid(run)||run.started)return;
+  run.started=true;run.startedAt=System.currentTimeMillis();run.startedElapsed=SystemClock.elapsedRealtime();
+  ownedRuns.add(run);
+  run.enhanced=BackgroundProtection.enabled(this);
+  run.client.withModel(run.configuredModel).withBackgroundResilience(run.enhanced);
+  run.renderUpdates=new StreamingMarkdown.Updates(()->{if(valid(run))publish(run);});
+  run.stream=new StreamingMarkdown(run.partial,()->renderLater(run));
+  run.reasoningStream=new StreamingMarkdown(run.reasoningText,()->renderLater(run));
+  persist(run,false,false);
+  publish(run);
+  if(networkReady(run,()->prepare(run)))prepare(run);
+  main.removeCallbacks(checkpoint);
+  main.postDelayed(checkpoint,3000);
+ }
+
+ private void renderLater(Run run){
+  if(valid(run))run.renderUpdates.schedule(Math.max(run.partial.length(),run.reasoningText.length()));
  }
  private void prepare(Run run){
-  worker.execute(()->{
-    try{if(!new ModelCapabilities(run.modelId,run.protocol,run.configuredModel).preserveReasoning()||!ChatApiClient.CHAT_COMPLETIONS.equals(run.protocol))for(int i=0;i<run.history.length();i++)run.history.getJSONObject(i).remove("reasoning_content");int capacity=ModelCapabilities.positive(run.configuredModel,"contextLength",ContextBudget.DEFAULT_CONTEXT),output=Integer.parseInt(run.outputTokens);ContextBudget.Result initial=ContextBudget.trim(run.history,capacity,output);run.history=initial.messages;run.omittedMessages=initial.omitted;prepareAttachments(run);recognizeDocuments(run);DocumentOcr.scrub(run.history);run.history=DeepSeekDocumentInput.prepare(getApplicationContext(),run.base,run.modelId,run.protocol,run.history,run.pdfPages,()->valid(run),text->main.post(()->status(run,text)));ContextBudget.Result budget=ContextBudget.trim(run.history,capacity,output);run.history=budget.messages;run.contextTokens=budget.estimatedTokens;run.omittedMessages+=budget.omitted;main.post(()->{if(valid(run))search(run);});}
-    catch(Exception failure){main.post(()->finish(run,networkFailure(run,failure.getMessage()==null?"附件或上下文准备失败，请检查配置。":failure.getMessage()),true,false));}
+  run.work=worker.submit(()->{
+    try{if(!valid(run)||Thread.currentThread().isInterrupted())return;if(!new ModelCapabilities(run.modelId,run.protocol,run.configuredModel).preserveReasoning()||!ChatApiClient.CHAT_COMPLETIONS.equals(run.protocol))for(int i=0;i<run.history.length();i++)run.history.getJSONObject(i).remove("reasoning_content");int capacity=ModelCapabilities.positive(run.configuredModel,"contextLength",ContextBudget.DEFAULT_CONTEXT),output=Integer.parseInt(run.outputTokens);ContextBudget.Result initial=ContextBudget.trim(run.history,capacity,output);run.history=initial.messages;run.omittedMessages=initial.omitted;prepareAttachments(run);recognizeDocuments(run);DocumentOcr.scrub(run.history);run.history=DeepSeekDocumentInput.prepare(getApplicationContext(),run.base,run.modelId,run.protocol,run.history,run.pdfPages,()->valid(run),text->main.post(()->status(run,text)));ContextBudget.Result budget=ContextBudget.trim(run.history,capacity,output);run.history=budget.messages;run.contextTokens=budget.estimatedTokens;run.omittedMessages+=budget.omitted;main.post(()->{if(valid(run))search(run);});}
+    catch(Exception failure){if(valid(run))main.post(()->finish(run,networkFailure(run,ApiFailure.safe(ApiFailure.local(failure),run.key)),true,false));}
     finally{run.session=null;run.prepared=Collections.emptyMap();if(!valid(run))run.pdfPages.close();}
    });
  }
@@ -161,9 +239,19 @@ public final class ChatGenerationService extends Service {
    .addAction(0,"停止生成",stop).build();
  }
  private void status(Run run,String value){
-  if(!valid(run))return;run.phaseStatus=value;run.status=run.networkNote.isEmpty()?value:run.networkNote;publish(run);
-  if(Build.VERSION.SDK_INT<33||ContextCompat.checkSelfPermission(this,android.Manifest.permission.POST_NOTIFICATIONS)==android.content.pm.PackageManager.PERMISSION_GRANTED)
-   try{getSystemService(NotificationManager.class).notify(NOTICE,notification(run));}catch(SecurityException ignored){}
+  if(!valid(run))return;
+  run.phaseStatus=value;
+  String visible=run.networkNote.isEmpty()?value:run.networkNote;
+  if(visible.equals(run.status))return;
+  run.status=visible;
+  publish(run);
+  updateNotification();
+ }
+ private void updateNotification(){
+  Run representative=current;
+  if(!foreground||representative==null)return;
+  try{getSystemService(NotificationManager.class).notify(NOTICE,notification(representative));}
+  catch(SecurityException denied){android.util.Log.d("ChatGeneration","Notification permission unavailable");}
  }
  private void search(Run run){
   if(!networkReady(run,()->search(run)))return;
@@ -207,77 +295,151 @@ public final class ChatGenerationService extends Service {
     public void onStatus(String text){main.post(()->status(run,text));}
     public void onSearchSources(SearchSources value,String status){sources(run,value,status);}
     public void onToolEvent(JSONObject event){main.post(()->{if(valid(run))run.toolEvents.put(event);});}
-    public void onDone(){main.post(()->finish(run,run.partial.toString(),run.partial.length()==0,false));}
-    public void onFinished(GenerationResult result){main.post(()->{run.completionState=result.state;run.finishReason="interrupted".equals(result.state)?networkFailure(run,result.reason):result.reason;run.usage=result.usage;if("filtered".equals(result.state)&&run.partial.length()==0)run.partial.append("模型未提供可显示的回答，回复因内容限制而终止。");finish(run,run.partial.toString(),false,"interrupted".equals(result.state));});}
+    public void onDone(){main.post(()->finish(run,"",run.partial.length()==0&&run.reasoningText.length()==0,false));}
+    public void onFinished(GenerationResult result){main.post(()->{
+     if(!valid(run))return;
+     run.completionState=result.state;
+     run.finishReason="interrupted".equals(result.state)?networkFailure(run,result.reason):result.reason;
+     run.usage=result.usage;
+     String notice="filtered".equals(result.state)&&run.partial.length()==0?"模型未提供可显示的回答，回复因内容限制而终止。":"";
+     boolean interrupted="interrupted".equals(result.state);
+     finish(run,notice,interrupted&&run.partial.length()==0&&run.reasoningText.length()==0,interrupted);
+    });}
     public void onError(String message){main.post(()->{
      if(!valid(run))return;
      if(!run.pdfFallbackTried&&run.partial.length()==0&&run.reasoningText.length()==0&&PdfPageFallback.shouldRetry(message,run.history)){retryPdfAsImages(run,message);return;}
      String detail=networkFailure(run,run.pdfFallbackTried?run.pdfOriginalError+"\n逐页图像兼容发送仍失败：\n"+message:message);
      run.completionState="interrupted";run.finishReason=detail;
-     if(run.partial.length()>0)finish(run,run.partial.toString(),false,true);else finish(run,detail,true,false);
+     if(run.partial.length()>0||run.reasoningText.length()>0)finish(run,"",false,true);else finish(run,detail,true,false);
     });}
    });
   }catch(Exception error){finish(run,ApiFailure.safe("请求准备失败："+ApiFailure.local(error)+"\n模型："+run.modelId+" · 协议："+run.protocol+" · 输出上限："+run.outputTokens,run.key),true,false);}
  }
  private void retryPdfAsImages(Run run,String original){
   run.pdfFallbackTried=true;run.pdfOriginalError=original;status(run,"接口拒绝 PDF，正在逐页转换为图像…");
-  worker.execute(()->{
+  run.work=worker.submit(()->{
    try{
+    if(!valid(run))return;
     JSONArray converted=PdfPageFallback.render(getApplicationContext(),run.history,run.pdfPages,()->valid(run),text->main.post(()->status(run,text)));
     main.post(()->{if(valid(run)){run.history=converted;chat(run);}});
    }catch(Exception failure){main.post(()->{if(valid(run))finish(run,original+"\nPDF 图像兼容处理失败："+ApiFailure.local(failure),true,false);});}
    finally{if(!valid(run))run.pdfPages.close();}
   });
  }
- private void finish(Run run,String text,boolean error,boolean stopped){
-  if(run==null||run.finished)return;
-  if(stopped&&run.partial.length()>0)text=run.partial.toString();
-  if(text.isEmpty()&&!stopped)text=run.reasoningText.length()>0?"模型只返回了思考内容，尚未生成最终回答。":"模型返回了空内容";
-  if(error&&run.finishReason.isEmpty())run.finishReason=text;
+ private void finish(Run run,String text,boolean error,boolean stopped){finish(run,text,error,stopped,false);}
+
+ private void finish(Run run,String text,boolean error,boolean stopped,boolean clearQueue){
+  if(!valid(run))return;
+  run.finished=true;
+  run.pendingNetworkAction=null;
+  if(run.renderUpdates!=null)run.renderUpdates.close();
+  String received=run.stream==null?run.partial.toString():run.stream.seal();
+  if(run.reasoningStream!=null)run.reasoningStream.seal();
+  run.cancel.cancel();
+  if(run.work!=null)run.work.cancel(true);
+  run.pdfPages.close();
+  if(!received.isEmpty())text=received;
+  if(text.isEmpty()&&!stopped){
+   text=run.thought().isEmpty()?"模型返回了空内容":"模型只返回了思考内容，尚未生成最终回答。";
+  }
+  if(error&&run.finishReason.isEmpty())run.finishReason=text.isEmpty()?"连接中断，请重试。":text;
   if(!error&&!stopped&&run.search.grounded()&&run.searchStatus.isEmpty())run.searchStatus="本次未调用搜索或网页读取";
-  run.error=error;run.stopped=stopped;run.finished=true;run.pendingNetworkAction=null;run.cancel.cancel();run.pdfPages.close();
-  if(stopped){run.completionState="interrupted";run.status="回复已停止或中断";}else if(error){run.completionState="error";run.status="回复生成失败";}else run.status=new GenerationResult(run.completionState,run.finishReason,run.usage).label();
-  if(run.stream!=null)run.stream.seal();if(run.reasoningStream!=null)run.reasoningStream.seal();
-  run.partial.setLength(0);run.partial.append(text);
-  persist(run,true);
-  runs.remove(run.sessionId);if(current==run)current=runs.isEmpty()?null:runs.values().iterator().next();
-  publish(run);if(!stopped&&!error)resumeQueue(this,run.sessionId);
-  if(runs.isEmpty()){main.removeCallbacks(checkpoint);if(wake!=null&&wake.isHeld())wake.release();wake=null;stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}
-  else {getSystemService(NotificationManager.class).notify(NOTICE,notification(current));main.removeCallbacks(checkpoint);main.postDelayed(checkpoint,3000);}
+  run.error=error;run.stopped=stopped;
+  if(run.stream!=null)run.stream.finish(text);
+  else synchronized(run.partial){run.partial.setLength(0);run.partial.append(text);}
+  if(error){run.completionState="error";run.status="回复生成失败";}
+  else if(stopped){run.completionState="interrupted";run.status="回复已停止或中断";}
+  else run.status=new GenerationResult(run.completionState,run.finishReason,run.usage).label();
+
+  persist(run,true,clearQueue);
+  ownedRuns.remove(run);
+  runs.remove(run.sessionId,run);
+  if(current==run)current=runs.isEmpty()?null:runs.values().iterator().next();
+  publish(run);
+  if(!stopped&&!error){
+   String pending=resumeQueue(this,run.sessionId);
+   if(!pending.isEmpty())android.util.Log.i("ChatGeneration",pending);
+  }
+  if(runs.isEmpty()){
+   main.removeCallbacks(checkpoint);
+   if(wake!=null&&wake.isHeld())wake.release();
+   wake=null;
+   foreground=false;
+   stopForeground(STOP_FOREGROUND_REMOVE);
+   stopSelf();
+  }else{
+   updateNotification();
+   main.removeCallbacks(checkpoint);
+   main.postDelayed(checkpoint,3000);
+  }
  }
- private void persist(Run run,boolean complete){
-  SharedPreferences prefs=getSharedPreferences("chat",MODE_PRIVATE);
+
+ private void persist(Run run,boolean complete,boolean clearQueue){
+  String answer=run.answer(),thought=run.thought(),search=run.searchStatus.isEmpty()?run.searchNote:run.searchStatus;
+  if(!complete&&answer==run.lastCheckpointAnswer&&thought==run.lastCheckpointThought
+    &&search.equals(run.lastCheckpointStatus)&&run.sources==run.lastCheckpointSources
+    &&run.toolEvents.length()==run.lastCheckpointTools)return;
+  SessionRepository repository=SessionRepository.get(getSharedPreferences("chat",MODE_PRIVATE));
   try{
-   JSONArray all=SessionRepository.get(prefs).read();JSONObject session=MessageEdits.findSession(all,run.sessionId);
+   JSONObject session=MessageEdits.findSession(repository.read(),run.sessionId);
    if(session==null||!run.branchId.equals(session.optString("activeBranchId")))return;
-   JSONObject message=new JSONObject().put("id",run.id).put("text",run.partial.toString()).put("user",false).put("timestamp",run.timestamp)
-    .put("modelId",run.modelId).put("reasoningContent",run.reasoningText.toString()).put("reasoningKind",ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol)?"summary":"reasoning").put("error",run.error).put("interrupted",run.stopped).put("searchStatus",run.searchStatus.isEmpty()?run.searchNote:run.searchStatus).put("toolEvents",run.toolEvents).put("sources",run.sources.items).put("completionState",run.completionState).put("finishReason",run.finishReason).put("usage",run.usage).put("modelName",run.configuredModel.optString("displayName",run.modelId)).put("estimatedInputTokens",run.contextTokens).put("omittedMessages",run.omittedMessages).put("searchNote",run.searchNote).put("pricing",run.configuredModel);
-    if(run.error&&ChatApiClient.RESPONSES.equals(run.protocol)&&run.search.hasTools()&&
-      run.reasoningText.length()==0&&ApiFailure.canRetryWithoutTools(run.finishReason)){
-     message.put("retryWithoutHostedTools",true);
-    }
+   JSONObject message=new JSONObject().put("id",run.id).put("text",answer).put("user",false).put("timestamp",run.timestamp)
+    .put("modelId",run.modelId).put("reasoningContent",thought).put("reasoningKind",ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol)?"summary":"reasoning").put("error",run.error).put("interrupted",run.stopped).put("searchStatus",search).put("toolEvents",run.toolEvents).put("sources",run.sources.items).put("completionState",run.completionState).put("finishReason",run.finishReason).put("usage",run.usage).put("modelName",run.configuredModel.optString("displayName",run.modelId)).put("estimatedInputTokens",run.contextTokens).put("omittedMessages",run.omittedMessages).put("searchNote",run.searchNote).put("pricing",run.configuredModel);
+   if(run.error&&ChatApiClient.RESPONSES.equals(run.protocol)&&run.search.hasTools()&&
+    thought.isEmpty()&&ApiFailure.canRetryWithoutTools(run.finishReason))message.put("retryWithoutHostedTools",true);
    if(complete){
-    session.remove("pendingReply");JSONArray messages=session.optJSONArray("messages");boolean exists=false;
-    if(messages!=null){for(int i=0;i<messages.length();i++){JSONObject old=messages.optJSONObject(i);if(old!=null&&run.id.equals(old.optString("id")))exists=true;}
-     if(!exists&&(!run.stopped||run.partial.length()>0||run.reasoningText.length()>0))messages.put(message);}
-    session.put("updatedAt",System.currentTimeMillis());ConversationBranches.sync(session);
-   }else {SessionRepository.get(prefs).checkpoint(run.sessionId,new JSONObject().put("branchId",run.branchId).put("message",message));return;}
-   SessionRepository.get(prefs).clearCheckpoint(run.sessionId);SessionRepository.get(prefs).upsert(session);
+    if(clearQueue)session.remove("outbox");
+    session.remove("pendingReply");
+    JSONArray messages=session.optJSONArray("messages");
+    if(messages!=null&&MessageEdits.indexOf(messages,run.id)<0&&(!run.stopped||run.error||!answer.isEmpty()||!thought.isEmpty())){
+     messages.put(message);
+    }
+    session.put("updatedAt",System.currentTimeMillis());
+    ConversationBranches.sync(session);
+    repository.complete(session);
+   }else{
+    repository.checkpoint(run.sessionId,new JSONObject().put("branchId",run.branchId).put("message",message));
+    run.lastCheckpointAnswer=answer;
+    run.lastCheckpointThought=thought;
+    run.lastCheckpointStatus=search;
+    run.lastCheckpointSources=run.sources;
+    run.lastCheckpointTools=run.toolEvents.length();
+   }
   }catch(JSONException failure){android.util.Log.e("ChatGeneration","Unable to persist reply",failure);}
  }
+
  static void recoverInterrupted(Context context){
-  if(!runs.isEmpty())return;SharedPreferences prefs=context.getSharedPreferences("chat",MODE_PRIVATE);
-  try{JSONArray all=SessionRepository.get(prefs).read();boolean changed=false;
-   for(int i=0;i<all.length();i++){JSONObject session=all.optJSONObject(i);JSONObject draft=session==null?null:session.optJSONObject("pendingReply");if(draft==null&&session!=null){String saved=prefs.getString("draft_"+session.optString("id"),"");if(!saved.isEmpty())try{draft=new JSONObject(saved);}catch(JSONException ignored){}}if(draft==null)continue;
-    session.remove("pendingReply");SessionRepository.get(prefs).clearCheckpoint(session.optString("id"));changed=true;
-    JSONObject message=draft.optJSONObject("message");JSONArray messages=session.optJSONArray("messages");
-    if(message==null||messages==null||!draft.optString("branchId").equals(session.optString("activeBranchId")))continue;
-    boolean exists=false;for(int j=0;j<messages.length();j++){JSONObject old=messages.optJSONObject(j);if(old!=null&&message.optString("id").equals(old.optString("id")))exists=true;}
-    if(!exists){message.put("interrupted",true).put("searchStatus","上次生成已中断 · 可重试");
-     if(message.optString("text").isEmpty())message.put("text","上次生成被系统终止，请重试。").put("error",true);
-     messages.put(message);ConversationBranches.sync(session);}
+  if(!runs.isEmpty())return;
+  SessionRepository repository=SessionRepository.get(context.getSharedPreferences("chat",MODE_PRIVATE));
+  try{
+   JSONArray all=repository.read();
+   Set<String> checkpoints=new HashSet<>();
+   for(int i=0;i<all.length();i++){
+    JSONObject session=all.optJSONObject(i);
+    if(session==null)continue;
+    String id=session.optString("id");
+    JSONObject draft=session.optJSONObject("pendingReply");
+    if(draft==null){
+     String saved=repository.checkpoint(id);
+     if(saved.isEmpty())continue;
+     try{draft=new JSONObject(saved);}
+     catch(JSONException invalid){checkpoints.add(id);continue;}
+    }
+    session.remove("pendingReply");
+    checkpoints.add(id);
+    JSONObject message=draft.optJSONObject("message");
+    JSONArray messages=session.optJSONArray("messages");
+    if(message==null||messages==null||!draft.optString("branchId").equals(session.optString("activeBranchId"))
+      ||MessageEdits.indexOf(messages,message.optString("id"))>=0)continue;
+    String reason="上次生成被系统终止，请重试。";
+    message.put("interrupted",true).put("completionState","interrupted").put("finishReason",reason).put("searchStatus","上次生成已中断 · 可重试");
+    if(message.optString("text").isEmpty()&&message.optString("reasoningContent").isEmpty()){
+     message.put("text",reason).put("error",true).put("completionState","error");
+    }
+    messages.put(message);
+    ConversationBranches.sync(session);
    }
-   if(changed)SessionRepository.get(prefs).replace(all);
+   if(!checkpoints.isEmpty())repository.replaceAndClear(all,checkpoints);
   }catch(JSONException failure){android.util.Log.e("ChatGeneration","Unable to restore interrupted reply",failure);}
  }
  private void prepareAttachments(Run run)throws Exception{
@@ -285,6 +447,7 @@ public final class ChatGenerationService extends Service {
   for(int i=0;i<run.history.length();i++){JSONObject entry=run.history.optJSONObject(i);if(entry!=null&&!entry.optString("_messageId").isEmpty())entries.put(entry.optString("_messageId"),entry);}
   int latestUser=-1;
   if(messages!=null)for(int i=messages.length()-1;i>=0;i--){JSONObject m=messages.optJSONObject(i);if(m!=null&&m.optBoolean("user")&&!m.optBoolean("error")){latestUser=i;break;}}
+  long retainedChars=0,limit=AttachmentSnapshots.requestCharacterLimit();
   if(messages!=null)for(int i=messages.length()-1;i>=0;i--){
    JSONObject message=messages.optJSONObject(i);if(message==null||message.optBoolean("error")||!message.optBoolean("user"))continue;
    JSONObject entry=entries.get(message.optString("id"));JSONArray attachments=message.optJSONArray("attachments");if(entry==null||attachments==null)continue;
@@ -292,12 +455,16 @@ public final class ChatGenerationService extends Service {
    for(int j=0;j<Math.min(10,attachments.length());j++){
     if(!valid(run)||Thread.currentThread().isInterrupted())return;
     JSONObject attachment=attachments.optJSONObject(j);if(attachment==null)continue;
-    try{String uri=attachment.optString("uri"),payload=run.prepared.get(uri);
+    try{attachment=SessionRepository.detached(attachment);String uri=attachment.optString("uri"),payload=i==latestUser?run.prepared.get(uri):null;
      if(payload==null)payload=AttachmentSnapshots.read(this,attachment);
      if(payload==null){if(!"content".equals(Uri.parse(uri).getScheme()))throw new java.io.IOException("附件地址不可读取");payload=AttachmentBatch.payload(getApplicationContext(),attachment);}
      if(AttachmentBatch.isFailure(payload))throw new java.io.IOException(AttachmentBatch.failureMessage(payload));
+     if(!AttachmentSnapshots.isPdfPayload(payload)&&retainedChars+payload.length()>limit){
+      throw new java.io.IOException("内联附件累计过大，请减少图片或文本文档数量");
+     }
      content.put(AttachmentBatch.part(getApplicationContext(),attachment,payload,run.protocol));
-    }catch(Exception unavailable){String reason="附件 "+attachment.optString("displayName","文件")+" 未发送："+ApiFailure.local(unavailable);if(i==latestUser)throw new java.io.IOException(reason);content.put(new JSONObject().put("type","text").put("text",reason));}
+     if(!AttachmentSnapshots.isPdfPayload(payload))retainedChars+=payload.length();
+    }catch(Exception unavailable){if(!valid(run)||Thread.currentThread().isInterrupted())return;String reason="附件 "+attachment.optString("displayName","文件")+" 未发送："+ApiFailure.local(unavailable);if(i==latestUser)throw new java.io.IOException(reason);content.put(new JSONObject().put("type","text").put("text",reason));}
    }entry.put("content",content).put("_ocrCache",message.optJSONArray("documentOcr"));
   }
  }
@@ -329,7 +496,9 @@ public final class ChatGenerationService extends Service {
  @Override public void onTaskRemoved(Intent rootIntent){SessionLaunchPolicy.markTaskRemoved();super.onTaskRemoved(rootIntent);}
  @Override public void onTimeout(int startId,int type){for(Run run:new ArrayList<>(runs.values()))finish(run,"后台运行时间已达系统限制，请重试。",true,true);}
  @Override public void onDestroy(){
-  for(Run run:new ArrayList<>(runs.values()))finish(run,run.partial.toString(),run.partial.length()==0,true);
+  foreground=false;
+  // The process-wide registry can already contain requests waiting for the next service instance.
+  for(Run run:new ArrayList<>(ownedRuns))finish(run,"",run.partial.length()==0&&run.reasoningText.length()==0,true);
   if(network!=null)network.close();main.removeCallbacksAndMessages(null);worker.shutdownNow();if(wake!=null&&wake.isHeld())wake.release();super.onDestroy();
  }
  @Override public IBinder onBind(Intent intent){return null;}

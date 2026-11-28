@@ -21,9 +21,8 @@ final class PaletteDialogs {
   };
  }
  static void prepare(AlertDialog dialog) {
-  // The builder has already created the AlertDialog before calling this hook. Calling
-  // dialog.create() here re-enters the overridden builder create path and causes a
-  // StackOverflowError when any menu action is tapped.
+  // Dialog.create installs its views without opening the window.
+  dialog.create();
   ThemePalette p=ThemePalette.resolve(dialog.getContext());
   if(dialog.getWindow()!=null) {
    dialog.getWindow().setBackgroundDrawable(new ColorDrawable(p.surface));

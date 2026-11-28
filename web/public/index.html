@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Aera 桌面网页版。选择自己的模型，在浏览器中对话、搜索和处理附件。">
+  <title>Aera · AI 工作台</title>
+  <link rel="stylesheet" href="/vendor/katex.css">
+  <link rel="stylesheet" href="/vendor/highlight.css">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/reasoning.css">
+  <script defer src="/vendor/katex.js"></script>
+  <script defer src="/vendor/auto-render.js"></script>
+  <script defer src="/vendor/highlight.js"></script>
+  <script type="module" src="/app.mjs"></script>
+</head>
+<body>
+  <div class="shell" inert aria-busy="true">
+    <aside class="sidebar" id="sidebar" aria-label="对话侧栏">
+      <div class="brand">
+        <span class="brand-icon" data-icon="spark" aria-hidden="true"></span>
+        <div><strong>Aera</strong><span>AI 工作台</span></div>
+      </div>
+      <button class="primary new-chat" data-action="new"><span data-icon="plus"></span>新建对话<kbd>Alt N</kbd></button>
+      <label class="history-search"><span data-icon="search"></span><input id="history-search" type="search" placeholder="搜索对话" aria-label="搜索对话"><kbd>/</kbd></label>
+      <section class="history" aria-label="历史对话">
+        <div class="history-heading"><h2 id="history-title">历史对话</h2><button class="plain-icon" id="archive" data-action="archive" title="查看归档" aria-label="查看归档"><span data-icon="archive"></span></button></div>
+        <nav id="sessions"></nav>
+      </section>
+      <div class="side-foot">
+        <button class="settings-link" data-action="settings"><span data-icon="settings"></span>设置<span class="link-end" data-icon="chevron"></span></button>
+        <div class="workspace-id"><div class="local-icon" data-icon="shield"></div><div><strong>本机工作区</strong><small>对话保存在此浏览器</small></div></div>
+      </div>
+    </aside>
+    <button class="scrim" data-action="sidebar" aria-label="关闭侧栏" hidden></button>
+    <main class="workspace is-empty">
+      <header class="topbar">
+        <button class="plain-icon mobile-menu" data-action="sidebar" title="对话侧栏" aria-label="打开对话侧栏" aria-controls="sidebar" aria-expanded="false"><span data-icon="sidebar"></span></button>
+        <div class="breadcrumbs"><span>工作台</span><span data-icon="chevron"></span><h1 id="chat-title">新对话</h1></div>
+        <div class="top-actions">
+          <button class="top-model" data-action="models"><span data-icon="layers"></span><span id="top-model-label">选择模型</span><span data-icon="down"></span></button>
+          <button class="plain-icon theme-switch" data-action="theme" title="切换浅色和深色主题" aria-label="切换浅色和深色主题"><span data-icon="moon"></span></button>
+          <button class="plain-icon more-button" data-action="chat-menu" title="对话操作" aria-label="对话操作"><span data-icon="more"></span></button>
+        </div>
+      </header>
+
+      <div class="chat-scroll" id="chat-scroll">
+        <section id="welcome" aria-labelledby="welcome-title" class="welcome">
+          <span class="welcome-mark" data-icon="spark" aria-hidden="true"></span>
+          <h2 id="welcome-title">今天想聊些什么？</h2>
+          <p id="welcome-copy" hidden></p>
+        </section>
+        <div id="messages" class="messages" hidden></div>
+      </div>
+
+      <footer class="compose-area">
+        <div id="queue" class="queue" hidden></div>
+        <form id="composer" class="composer" aria-label="消息编辑器">
+          <div id="draft-files" class="draft-files" hidden></div>
+          <textarea id="prompt" rows="2" placeholder="给 Aera 发送消息…" aria-label="输入消息"></textarea>
+          <div class="composer-tools">
+            <div class="tool-group">
+              <button type="button" class="tool-icon" data-action="attach" title="添加图片、PDF 或文档" aria-label="添加附件"><span data-icon="clip"></span></button>
+              <div class="tool-separator"></div>
+              <button type="button" class="tool-chip" id="web-search" data-action="search-toggle" aria-pressed="false"><span data-icon="globe"></span><span>联网搜索</span></button>
+              <button type="button" class="effort tool-chip" id="effort" popovertarget="reasoning-popover" aria-controls="reasoning-popover" aria-expanded="false" aria-label="思考强度 · Auto"><span data-icon="reasoning"></span><span id="effort-label">Auto</span><span class="effort-chevron" data-icon="down"></span></button>
+              <section class="reasoning-popover" id="reasoning-popover" popover="auto" aria-label="思考强度"></section>
+            </div>
+            <div class="tool-group send-group">
+              <button type="button" class="small-button" id="stop" data-action="stop" hidden><span data-icon="stop"></span><span>停止</span></button>
+              <button type="submit" class="send" title="发送 (Enter)" aria-label="发送消息"><span data-icon="send"></span></button>
+            </div>
+          </div>
+        </form>
+        <div class="compose-caption"><span><kbd>Enter</kbd> 发送 <span class="caption-divider">·</span> <kbd>Shift + Enter</kbd> 换行</span><span><span data-icon="shield"></span><span id="storage-note">对话仅保存在此浏览器</span></span></div>
+      </footer>
+      <input type="file" id="attachments" multiple hidden>
+      <input type="file" id="backup" accept=".zip,application/zip" hidden>
+    </main>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <div id="notice" class="notice" role="status" hidden></div>
+</body>
+</html>

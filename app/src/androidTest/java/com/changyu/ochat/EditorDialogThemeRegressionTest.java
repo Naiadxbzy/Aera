@@ -2,7 +2,6 @@ package com.changyu.ochat;
 
 import android.app.AlertDialog;
 import android.content.Context;
-import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.util.TypedValue;
 import android.widget.EditText;
@@ -30,7 +29,7 @@ public class EditorDialogThemeRegressionTest {
     assertTrue(ColorUtils.calculateContrast(editor.getCurrentTextColor(),p.input)>4.5);
     assertEquals(p.primary,dialog.getButton(AlertDialog.BUTTON_POSITIVE).getCurrentTextColor());
     TypedValue value=new TypedValue();assertTrue(themed.getTheme().resolveAttribute(android.R.attr.colorBackground,value,true));
-    assertEquals("dark".equals(mode)?Color.parseColor("#211F26"):Color.WHITE,value.data);
+    assertEquals(p.surface,value.data);
     assertEquals("unsaved draft",editor.getText().toString());dialog.dismiss();
    }}finally{android.content.SharedPreferences.Editor e=prefs.edit();if(previous==null)e.remove("themeMode");else e.putString("themeMode",previous);if(previousText==null)e.remove("themeText");else e.putString("themeText",previousText);if(previousSurface==null)e.remove("themeSurface");else e.putString("themeSurface",previousSurface);e.commit();}
   });
