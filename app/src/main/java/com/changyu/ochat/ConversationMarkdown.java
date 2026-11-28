@@ -70,6 +70,20 @@ final class ConversationMarkdown {
    out.write("\n\n**附件**\n\n- "+label(message.optString("attachment")));
   }
 
+  JSONArray generatedImages=message.optJSONArray("generatedImages");
+  if(generatedImages!=null&&generatedImages.length()>0){
+   out.write("\n\n**生成图片**\n");
+   for(int i=0;i<generatedImages.length();i++){
+    JSONObject image=generatedImages.optJSONObject(i);
+    if(image==null)continue;
+    String imageModel=image.optString("model","");
+    String imageMode=ImageToolConfig.MODE_DIRECT.equals(image.optString("mode"))?"自写提示词":"AI 编写提示词";
+    String imagePrompt=image.optString("prompt","").trim();
+    out.write("\n- "+(imageModel.isEmpty()?"图片":label(imageModel))+"（"+imageMode+"）");
+    if(!imagePrompt.isEmpty())out.write("："+label(imagePrompt));
+   }
+  }
+
   JSONArray sources=message.optJSONArray("sources");
   boolean heading=false;
   for(int i=0;sources!=null&&i<sources.length();i++){

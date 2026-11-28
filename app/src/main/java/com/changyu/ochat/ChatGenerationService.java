@@ -32,11 +32,11 @@ public final class ChatGenerationService extends Service {
   SearchOptions search=SearchOptions.OFF;SearchSources sources=new SearchSources();
   volatile boolean finished;private volatile String sourceUpdate="";boolean error,stopped,started;StreamingMarkdown stream,reasoningStream;
   boolean enhanced,networkDisrupted;String phaseStatus="正在准备上下文和附件…",networkNote="";Runnable pendingNetworkAction;long waitingSince,startedElapsed;
-  JSONObject configuredModel=new JSONObject(),usage=new JSONObject();String completionState="complete",finishReason="",searchNote="",searchStatus="";final JSONArray toolEvents=new JSONArray();int contextTokens,omittedMessages;long startedAt;
+  JSONObject configuredModel=new JSONObject(),usage=new JSONObject();String completionState="complete",finishReason="",searchNote="",searchStatus="";final JSONArray toolEvents=new JSONArray(),generatedImages=new JSONArray();final StringBuffer imagePlanRaw=new StringBuffer();ImageToolConfig imageTool;int contextTokens,omittedMessages;long startedAt;
   Future<?> work;
   StreamingMarkdown.Updates renderUpdates;
   String lastCheckpointAnswer,lastCheckpointThought,lastCheckpointStatus;
-  int lastCheckpointTools=-1;
+  int lastCheckpointTools=-1,lastCheckpointImages=-1;
   volatile boolean stopRequested;
   SearchSources lastCheckpointSources;
   String answer(){return stream==null?partial.toString():stream.snapshot();}
@@ -88,7 +88,7 @@ public final class ChatGenerationService extends Service {
  private static void publish(Run run){Listener target=listener.get();if(target!=null)target.changed(run);}
  static JSONArray history(JSONObject session,String prompt)throws JSONException{
   JSONArray result=new JSONArray();if(!prompt.trim().isEmpty())result.put(new JSONObject().put("role","system").put("content",prompt));
-  JSONArray messages=session.optJSONArray("messages");if(messages!=null)for(int i=0;i<messages.length();i++){JSONObject m=messages.optJSONObject(i);if(m!=null&&!m.optBoolean("error"))result.put(new JSONObject().put("role",m.optBoolean("user")?"user":"assistant").put("content",m.optString("text")).put("_messageId",m.optString("id")).put("reasoning_content",m.optString("reasoningContent")));}
+  JSONArray messages=session.optJSONArray("messages");if(messages!=null)for(int i=0;i<messages.length();i++){JSONObject m=messages.optJSONObject(i);if(m!=null&&!m.optBoolean("error")){String text=m.optString("text");if(!m.optBoolean("user")){String imageNote=ImageToolPrompt.historyContextNote(m.optJSONArray("generatedImages"));if(!imageNote.isEmpty())text=text.isEmpty()?imageNote:text+"\n\n"+imageNote;}result.put(new JSONObject().put("role",m.optBoolean("user")?"user":"assistant").put("content",text).put("_messageId",m.optString("id")).put("reasoning_content",m.optString("reasoningContent")));}}
   return result;
  }
  static void enqueue(Context context,String sessionId,JSONObject queued)throws JSONException{
@@ -121,20 +121,29 @@ public final class ChatGenerationService extends Service {
    JSONObject config=next.optJSONObject("config");
    if(config==null)config=SessionConfig.capture(prefs);
    SessionConfig scoped=new SessionConfig(prefs,new JSONObject().put("config",SessionRepository.detached(config)));
+   JSONObject queuedMessage=next.getJSONObject("message");
+   ImageToolConfig imageTool=ImageToolConfig.fromJson(next.has("imageTool")?next.optJSONObject("imageTool"):queuedMessage.optJSONObject("imageTool"));
+   if(imageTool!=null){
+    String imageError=imageTool.validate(ImageToolConfig.findProvider(ModelStore.read(prefs),imageTool.providerId));
+    if(!imageError.isEmpty())return "排队生图任务不可用："+imageError;
+   }
    JSONObject provider=scoped.provider();
    String model=scoped.getString("modelId","");
    JSONObject configuredModel=ModelCapabilities.find(provider,model);
-   if(provider.optString("api").isEmpty()||provider.optString("apiKey").isEmpty()||!configuredModel.has("id")){
+   boolean directImage=imageTool!=null&&!imageTool.isAiMode();
+   if(!directImage&&(provider.optString("api").isEmpty()||provider.optString("apiKey").isEmpty()||!configuredModel.has("id"))){
     return "排队消息的供应商或模型不可用。恢复该配置后可继续发送。";
    }
    JSONObject projected=GenerationQueue.promote(session,index);
-   Run run=new Run(sessionId,model,scoped.getString("reasoningEffort","default"),System.currentTimeMillis());
-   run.base=provider.optString("api");run.key=provider.optString("apiKey");run.protocol=provider.optString("protocol",ChatApiClient.CHAT_COMPLETIONS);
-   run.configuredModel=configuredModel;
+   String runModel=directImage?imageTool.model:model;
+   Run run=new Run(sessionId,runModel,directImage?"default":scoped.getString("reasoningEffort","default"),System.currentTimeMillis());
+   run.imageTool=imageTool;
+   run.base=provider.optString("api");run.key=provider.optString("apiKey");run.protocol=directImage?imageTool.protocol:provider.optString("protocol",ChatApiClient.CHAT_COMPLETIONS);
+   run.configuredModel=directImage?new JSONObject().put("id",imageTool.model).put("displayName",imageTool.model):configuredModel;
    run.temperature=scoped.getString("conversationTemperature","0.7");run.topP=scoped.getString("conversationTopP","0.9");run.outputTokens=scoped.getString("outputTokens",configuredModel.optString("outputTokens",ContextBudget.DEFAULT_OUTPUT_TEXT));
-   run.search=SearchOptions.capture(scoped,run.protocol);
+   run.search=directImage?SearchOptions.OFF:SearchOptions.capture(scoped,run.protocol);
    if(!run.search.error.isEmpty())return run.search.error;
-   run.branchId=branchId;run.history=history(projected,scoped.getString("systemPrompt",""));run.query=next.getJSONObject("message").optString("text");
+   run.branchId=branchId;run.history=history(projected,scoped.getString("systemPrompt",""));run.query=queuedMessage.optString("text");
    launch(context,run);
    repository.upsert(projected);
    run.session=repository.snapshot(sessionId);
@@ -184,9 +193,16 @@ public final class ChatGenerationService extends Service {
   run.renderUpdates=new StreamingMarkdown.Updates(()->{if(valid(run))publish(run);});
   run.stream=new StreamingMarkdown(run.partial,()->renderLater(run));
   run.reasoningStream=new StreamingMarkdown(run.reasoningText,()->renderLater(run));
-  persist(run,false,false);
-  publish(run);
-  if(networkReady(run,()->prepare(run)))prepare(run);
+  if(run.imageTool!=null&&!run.imageTool.isAiMode()){
+   run.status=run.phaseStatus="正在调用生成图片工具…";
+   persist(run,false,false);
+   publish(run);
+   if(networkReady(run,()->generateImage(run,run.query,"","")))generateImage(run,run.query,"","");
+  }else{
+   persist(run,false,false);
+   publish(run);
+   if(networkReady(run,()->prepare(run)))prepare(run);
+  }
   main.removeCallbacks(checkpoint);
   main.postDelayed(checkpoint,3000);
  }
@@ -283,37 +299,150 @@ public final class ChatGenerationService extends Service {
  private void chat(Run run){
   if(!networkReady(run,()->chat(run)))return;
   try{
+   boolean imageAiMode=run.imageTool!=null&&run.imageTool.isAiMode();
+   JSONArray messages=imageAiMode?ImageToolPrompt.prepareHistory(run.history,run.imageTool.model,run.imageTool.size):run.history;
    boolean sampling=new ModelCapabilities(run.modelId,run.protocol,run.configuredModel).sampling;double temperature=sampling?ModelStore.range(run.temperature,2):.7,top=sampling?ModelStore.range(run.topP,1):1;int max=Integer.parseInt(run.outputTokens);if(max<=0)throw new IllegalArgumentException();
-   ContextBudget.Result budget=ContextBudget.trim(run.history,ModelCapabilities.positive(run.configuredModel,"contextLength",ContextBudget.DEFAULT_CONTEXT),max);run.history=budget.messages;run.contextTokens=budget.estimatedTokens;run.omittedMessages+=budget.omitted;max=budget.outputTokens;
+   ContextBudget.Result budget=ContextBudget.trim(messages,ModelCapabilities.positive(run.configuredModel,"contextLength",ContextBudget.DEFAULT_CONTEXT),max);run.history=budget.messages;run.contextTokens=budget.estimatedTokens;run.omittedMessages+=budget.omitted;max=budget.outputTokens;
    if(new ModelCapabilities(run.modelId,run.protocol,run.configuredModel).needsBudget()&&!"default".equals(run.effort)&&!"none".equals(run.effort)&&max<=1024)throw new IllegalArgumentException("剩余上下文只能分配 "+max+" 个输出 token，此 Claude 模型开启思考至少需要 1025；请减少输入、增加模型上下文容量，或选择自动 / none");
-   status(run,"正在接收回复");
+   status(run,imageAiMode?"AI 正在分析请求并编写提示词…":"正在接收回复");
    run.client.streamChat(run.base,run.key,run.modelId,run.history,temperature,max,top,run.effort,run.protocol,run.search,new ChatApiClient.StreamCallback(){
-    public void onDelta(String text){if(valid(run))run.stream.append(text);}
-    public void onSnapshot(String text){if(valid(run))run.stream.replace(text);}
+    public void onDelta(String text){if(!valid(run))return;if(imageAiMode)synchronized(run.imagePlanRaw){run.imagePlanRaw.append(text);}else run.stream.append(text);}
+    public void onSnapshot(String text){if(!valid(run))return;if(imageAiMode)synchronized(run.imagePlanRaw){run.imagePlanRaw.setLength(0);run.imagePlanRaw.append(text);}else run.stream.replace(text);}
     public void onReasoning(String text){if(valid(run))run.reasoningStream.append(text);}
     public void onReasoningSnapshot(String text){if(valid(run))run.reasoningStream.replace(text);}
     public void onStatus(String text){main.post(()->status(run,text));}
     public void onSearchSources(SearchSources value,String status){sources(run,value,status);}
     public void onToolEvent(JSONObject event){main.post(()->{if(valid(run))run.toolEvents.put(event);});}
-    public void onDone(){main.post(()->finish(run,"",run.partial.length()==0&&run.reasoningText.length()==0,false));}
+    public void onDone(){main.post(()->{
+     if(!valid(run))return;
+     if(imageAiMode){proceedToImageGeneration(run,new GenerationResult("complete","",run.usage));return;}
+     finish(run,"",run.partial.length()==0&&run.reasoningText.length()==0,false);
+    });}
     public void onFinished(GenerationResult result){main.post(()->{
      if(!valid(run))return;
      run.completionState=result.state;
      run.finishReason="interrupted".equals(result.state)?networkFailure(run,result.reason):result.reason;
      run.usage=result.usage;
+     if(imageAiMode){
+      String raw;synchronized(run.imagePlanRaw){raw=run.imagePlanRaw.toString().trim();}
+      if(("filtered".equals(result.state)||"refusal".equals(result.state))&&raw.isEmpty()){
+       finish(run,"模型拒绝生成此图片提示词，未调用生成图片工具。",false,false);
+       return;
+      }
+      if("interrupted".equals(result.state)&&raw.isEmpty()){
+       finish(run,run.finishReason,true,true);
+       return;
+      }
+      proceedToImageGeneration(run,result);
+      return;
+     }
      String notice="filtered".equals(result.state)&&run.partial.length()==0?"模型未提供可显示的回答，回复因内容限制而终止。":"";
      boolean interrupted="interrupted".equals(result.state);
      finish(run,notice,interrupted&&run.partial.length()==0&&run.reasoningText.length()==0,interrupted);
     });}
     public void onError(String message){main.post(()->{
      if(!valid(run))return;
-     if(!run.pdfFallbackTried&&run.partial.length()==0&&run.reasoningText.length()==0&&PdfPageFallback.shouldRetry(message,run.history)){retryPdfAsImages(run,message);return;}
+     if(!run.pdfFallbackTried&&run.partial.length()==0&&run.reasoningText.length()==0&&run.imagePlanRaw.length()==0&&PdfPageFallback.shouldRetry(message,run.history)){retryPdfAsImages(run,message);return;}
      String detail=networkFailure(run,run.pdfFallbackTried?run.pdfOriginalError+"\n逐页图像兼容发送仍失败：\n"+message:message);
      run.completionState="interrupted";run.finishReason=detail;
-     if(run.partial.length()>0||run.reasoningText.length()>0)finish(run,"",false,true);else finish(run,detail,true,false);
+     if(!imageAiMode&&(run.partial.length()>0||run.reasoningText.length()>0))finish(run,"",false,true);else finish(run,detail,true,false);
     });}
    });
   }catch(Exception error){finish(run,ApiFailure.safe("请求准备失败："+ApiFailure.local(error)+"\n模型："+run.modelId+" · 协议："+run.protocol+" · 输出上限："+run.outputTokens,run.key),true,false);}
+ }
+
+ private void proceedToImageGeneration(Run run,GenerationResult result){
+  if(!valid(run))return;
+  String raw;synchronized(run.imagePlanRaw){raw=run.imagePlanRaw.toString();}
+  ImageToolPrompt.Plan plan=ImageToolPrompt.parse(raw,run.query);
+  try{
+   run.toolEvents.put(new JSONObject().put("tool","image_prompt").put("status","completed")
+    .put("input",run.query).put("output",plan.prompt));
+  }catch(JSONException ignored){}
+  run.usage=result.usage;
+  generateImage(run,plan.prompt,plan.aspectRatio,plan.reply);
+ }
+
+ private void generateImage(Run run,String prompt,String suggestedAspect,String replyText){
+  if(!networkReady(run,()->generateImage(run,prompt,suggestedAspect,replyText)))return;
+  String finalPrompt=prompt==null?"":prompt.trim();
+  if(finalPrompt.isEmpty()){
+   finish(run,"生图提示词为空，请重新输入描述。",true,false);
+   return;
+  }
+  status(run,"正在调用生成图片工具…");
+  run.work=worker.submit(()->{
+   MediaGenerationStore store=new MediaGenerationStore(this);
+   String jobId=MediaGenerationStore.newId();
+   JSONObject imageProvider=ImageToolConfig.findProvider(ModelStore.read(getSharedPreferences("chat",MODE_PRIVATE)),run.imageTool.providerId);
+   String validation=run.imageTool.validate(imageProvider);
+   if(!validation.isEmpty()){
+    main.post(()->{if(valid(run))finish(run,validation,true,false);});
+    return;
+   }
+   String finalSize=!run.imageTool.size.isEmpty()?run.imageTool.size:ImageToolConfig.mapAspectRatioForProtocol(suggestedAspect,run.imageTool.protocol);
+   JSONObject job=new JSONObject();
+   try{
+    job.put("id",jobId).put("sessionId",run.sessionId).put("createdAt",System.currentTimeMillis())
+     .put("providerId",run.imageTool.providerId).put("providerName",imageProvider.optString("name",run.imageTool.providerName))
+     .put("endpoint",MediaGenerationService.endpointIdentity(imageProvider))
+     .put("model",run.imageTool.model).put("prompt",finalPrompt).put("video",false)
+     .put("size",finalSize).put("seconds",0).put("state","running").put("detail","正在生成图片");
+    store.save(job);
+    String mime=MediaGenerationClient.generate(imageProvider,run.imageTool.model,finalPrompt,false,finalSize,0,"",
+     store.temporaryFile(jobId),run.cancel,(remote,label)->{
+      try{
+       if(remote!=null&&!remote.isEmpty())job.put("remoteId",remote);
+       if(label!=null&&!label.isEmpty()){
+        job.put("detail",label);
+        main.post(()->status(run,label));
+       }
+       store.save(job);
+      }catch(JSONException e){throw new java.io.IOException(e);}
+     });
+    if(!valid(run)||run.cancel.isCancelled())throw new java.io.IOException("已停止");
+    job.put("mime",mime).put("state","publishing").put("detail","正在保存图片");
+    store.save(job);
+    store.finish(jobId);
+    job.put("state","complete").put("detail","");
+    store.save(job);
+    JSONObject imageRecord=new JSONObject()
+     .put("jobId",jobId).put("mime",mime).put("prompt",finalPrompt)
+     .put("originalRequest",run.query).put("mode",run.imageTool.mode)
+     .put("providerId",run.imageTool.providerId)
+     .put("providerName",imageProvider.optString("name",run.imageTool.providerName))
+     .put("model",run.imageTool.model).put("size",finalSize);
+    main.post(()->{
+     if(!valid(run))return;
+     run.generatedImages.put(imageRecord);
+     try{
+      run.toolEvents.put(new JSONObject().put("tool","generate_image").put("status","completed")
+       .put("input",run.imageTool.model+(finalSize.isEmpty()?"":" · "+finalSize)+"\n"+finalPrompt)
+       .put("output","图片已生成（"+mime+"）"));
+     }catch(JSONException ignored){}
+     run.completionState="complete";
+     finish(run,replyText==null?"":replyText,false,false);
+    });
+   }catch(Exception failure){
+    store.discardPartial(jobId);
+    String imageKey=imageProvider.optString("apiKey");
+    String detail=ApiFailure.safe(ApiFailure.local(failure),imageKey);
+    try{
+     job.put("state",run.cancel.isCancelled()?"stopped":"failed").put("detail",detail.substring(0,Math.min(detail.length(),1000)));
+     if(job.has("id"))store.save(job);
+    }catch(Exception ignored){}
+    main.post(()->{
+     if(!valid(run))return;
+     try{
+      run.toolEvents.put(new JSONObject().put("tool","generate_image").put("status","failed")
+       .put("input",run.imageTool.model+(finalSize.isEmpty()?"":" · "+finalSize)+"\n"+finalPrompt)
+       .put("output",detail));
+     }catch(JSONException ignored){}
+     if(run.cancel.isCancelled())finish(run,"",false,true);
+     else finish(run,networkFailure(run,"图片生成失败："+detail),true,false);
+    });
+   }
+  });
  }
  private void retryPdfAsImages(Run run,String original){
   run.pdfFallbackTried=true;run.pdfOriginalError=original;status(run,"接口拒绝 PDF，正在逐页转换为图像…");
@@ -339,7 +468,7 @@ public final class ChatGenerationService extends Service {
   if(run.work!=null)run.work.cancel(true);
   run.pdfPages.close();
   if(!received.isEmpty())text=received;
-  if(text.isEmpty()&&!stopped){
+  if(text.isEmpty()&&!stopped&&run.generatedImages.length()==0){
    text=run.thought().isEmpty()?"模型返回了空内容":"模型只返回了思考内容，尚未生成最终回答。";
   }
   if(error&&run.finishReason.isEmpty())run.finishReason=text.isEmpty()?"连接中断，请重试。":text;
@@ -378,20 +507,21 @@ public final class ChatGenerationService extends Service {
   String answer=run.answer(),thought=run.thought(),search=run.searchStatus.isEmpty()?run.searchNote:run.searchStatus;
   if(!complete&&answer==run.lastCheckpointAnswer&&thought==run.lastCheckpointThought
     &&search.equals(run.lastCheckpointStatus)&&run.sources==run.lastCheckpointSources
-    &&run.toolEvents.length()==run.lastCheckpointTools)return;
+    &&run.toolEvents.length()==run.lastCheckpointTools&&run.generatedImages.length()==run.lastCheckpointImages)return;
   SessionRepository repository=SessionRepository.get(getSharedPreferences("chat",MODE_PRIVATE));
   try{
    JSONObject session=MessageEdits.findSession(repository.read(),run.sessionId);
    if(session==null||!run.branchId.equals(session.optString("activeBranchId")))return;
    JSONObject message=new JSONObject().put("id",run.id).put("text",answer).put("user",false).put("timestamp",run.timestamp)
     .put("modelId",run.modelId).put("reasoningContent",thought).put("reasoningKind",ChatApiClient.RESPONSES.equals(run.protocol)||ChatApiClient.GEMINI.equals(run.protocol)?"summary":"reasoning").put("error",run.error).put("interrupted",run.stopped).put("searchStatus",search).put("toolEvents",run.toolEvents).put("sources",run.sources.items).put("completionState",run.completionState).put("finishReason",run.finishReason).put("usage",run.usage).put("modelName",run.configuredModel.optString("displayName",run.modelId)).put("estimatedInputTokens",run.contextTokens).put("omittedMessages",run.omittedMessages).put("searchNote",run.searchNote).put("pricing",run.configuredModel);
+   if(run.generatedImages.length()>0)message.put("generatedImages",run.generatedImages);
    if(run.error&&ChatApiClient.RESPONSES.equals(run.protocol)&&run.search.hasTools()&&
     thought.isEmpty()&&ApiFailure.canRetryWithoutTools(run.finishReason))message.put("retryWithoutHostedTools",true);
    if(complete){
     if(clearQueue)session.remove("outbox");
     session.remove("pendingReply");
     JSONArray messages=session.optJSONArray("messages");
-    if(messages!=null&&MessageEdits.indexOf(messages,run.id)<0&&(!run.stopped||run.error||!answer.isEmpty()||!thought.isEmpty())){
+    if(messages!=null&&MessageEdits.indexOf(messages,run.id)<0&&(!run.stopped||run.error||!answer.isEmpty()||!thought.isEmpty()||run.generatedImages.length()>0)){
      messages.put(message);
     }
     session.put("updatedAt",System.currentTimeMillis());
@@ -404,6 +534,7 @@ public final class ChatGenerationService extends Service {
     run.lastCheckpointStatus=search;
     run.lastCheckpointSources=run.sources;
     run.lastCheckpointTools=run.toolEvents.length();
+    run.lastCheckpointImages=run.generatedImages.length();
    }
   }catch(JSONException failure){android.util.Log.e("ChatGeneration","Unable to persist reply",failure);}
  }

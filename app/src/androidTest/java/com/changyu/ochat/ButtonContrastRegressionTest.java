@@ -69,7 +69,7 @@ public class ButtonContrastRegressionTest {
     AlertDialog ordinary=PaletteDialogs.builder(c).setTitle("Confirmation").setMessage("No editor").setNegativeButton("Cancel",null).setPositiveButton("Save",null).create();
     assertFalse(ordinary.isShowing());contrast(ordinary.getButton(-1));contrast(ordinary.getButton(-2));ordinary.dismiss();
    });
-   activity(MainActivity.class,null,"发送消息","新建对话","展开输入框","插入提示词");
+   activity(MainActivity.class,null,"发送消息","新建对话","展开输入框","插入提示词","生成图片工具");
    activity(SettingsActivity.class,null,"手动添加模型 ID","获取模型 / 测试连接","保存供应商");
    activity(SettingsOptionActivity.class,"conversation","保存并返回");
    activity(SettingsOptionActivity.class,"topic","测试命名模型","保存并返回");

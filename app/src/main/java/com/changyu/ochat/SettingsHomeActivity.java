@@ -33,6 +33,7 @@ public class SettingsHomeActivity extends AppCompatActivity {
         addCard(body,"提示词库","管理可在输入框复用的模板",v->new PromptLibraryUi(this,prefs).manage());
         String searchMode=prefs.getString(SearchOptions.PREF,SearchOptions.AUTO);String searchSummary=SearchOptions.RESPONSES.equals(searchMode)?"Responses内置搜索 · 无需 Tavily Key":SearchOptions.TAVILY.equals(searchMode)?(prefs.getString("tavilyKey","").trim().isEmpty()?"Tavily · Key 未配置":"Tavily · Key 已配置"):"自动 · 按供应商协议选择";
         addCard(body,"联网搜索",searchSummary,v->open("search"));
+        addCard(body,"图片生成工具",imageToolSummary(),v->ImageToolSheet.show(this,prefs,prefs.getString("providerId",""),false,saved->setContentView(build()),null,null));
         addCard(body,"后台连接",BackgroundProtection.summary(this),v->startActivity(new Intent(this,BackgroundSettingsActivity.class)));
         addCard(body,"主题设置",themeSummary(),v->open("theme"));
         addCard(body,"话题命名模型",prefs.getBoolean("topicEnabled",false)?topicSummary():"未启用",v->open("topic"));
@@ -52,6 +53,7 @@ public class SettingsHomeActivity extends AppCompatActivity {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(intent);
     }
+    private String imageToolSummary(){ImageToolConfig config=ImageToolConfig.resolve(prefs,prefs.getString("providerId",""));return config.modeShortSummary()+(config.model.isEmpty()?"":" · "+config.model);}
     private String themeSummary(){String v=prefs.getString("themeMode","system"); return "light".equals(v)?"浅色":"dark".equals(v)?"深色":"跟随系统";}
     private void addCard(LinearLayout body,String title,String summary,View.OnClickListener listener){
         View row=UiStyle.preference(this,title,summary,false,listener);
